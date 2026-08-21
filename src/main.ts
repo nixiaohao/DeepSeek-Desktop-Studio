@@ -21,9 +21,9 @@ import { relaunchApp } from './relaunch.js'
 
 // ── Startup hardening (must run before app ready) ──
 // 1. GPU 加速在虚拟机/远程桌面/部分驱动上会导致白屏或启动崩溃，本应用为 Web UI 外壳，无需 GPU。
-// 2. 公司受管设备的 EDR/AppLocker 常拦截 Chromium 沙箱子进程（restricted token + job object），
-//    导致主进程卡在启动、whenReady 永不触发；本应用本质是执行任意 agent 代码的外壳，
-//    关闭沙箱不引入额外风险面，换取受管环境兼容性。
+// 2. 受管/加固环境（EDR、AppLocker、终端安全策略等）常拦截 Chromium 沙箱子进程
+//    （restricted token + job object），导致主进程卡在启动、whenReady 永不触发；
+//    本应用本质是执行任意 agent 代码的外壳，关闭沙箱不引入额外风险面，换取此类环境兼容性。
 app.disableHardwareAcceleration()
 app.commandLine.appendSwitch('no-sandbox')
 
