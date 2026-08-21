@@ -1,0 +1,105 @@
+/* DeepSeek Studio — Default Dark Theme
+ * Overrides the 13 official --dsw-alias-* tokens exposed by ThemeRuntime,
+ * plus selected --dsw-specific-* tokens for a cohesive dark look.
+ * Injected via webContents.insertCSS() at BrowserWindow load.
+ */
+
+/* ── Force dark color-scheme ── */
+:root {
+  color-scheme: dark;
+}
+
+/* ── Background layers ── */
+body {
+  --dsw-alias-bg-base:            #0f1117;
+  --dsw-alias-bg-layer-1:         #1a1d27;
+  --dsw-alias-bg-layer-2:         #222536;
+  --dsw-alias-bg-overlay:         #2d3148;
+}
+
+/* ── Borders ── */
+body {
+  --dsw-alias-border-l1:          rgba(255, 255, 255, 0.06);
+  --dsw-alias-border-l2:          rgba(255, 255, 255, 0.10);
+}
+
+/* ── Brand ── */
+body {
+  --dsw-alias-brand-primary:      #6366f1;
+}
+
+/* ── Text labels ── */
+body {
+  --dsw-alias-label-primary:      #e2e8f0;
+  --dsw-alias-label-secondary:    #94a3b8;
+}
+
+/* ── Semantic states ── */
+body {
+  --dsw-alias-state-error-primary:   #ef4444;
+  --dsw-alias-state-success-primary: #22c55e;
+  --dsw-alias-state-warn-primary:    #f59e0b;
+}
+
+/* ── Sidebar ── */
+body {
+  --dsw-specific-sidebar-fill:                #141620;
+  --dsw-specific-sidebar-nav-item-active:     rgba(99, 102, 241, 0.15);
+  --dsw-specific-sidebar-nav-item-hover:      rgba(99, 102, 241, 0.08);
+  --dsw-specific-sidebar-nav-item-active-accent: rgba(99, 102, 241, 0.25);
+}
+
+/* ── Chat bubbles ── */
+body {
+  --dsw-specific-bubble:            #1a1d27;
+  --dsw-specific-bubble-highlight:  #222536;
+}
+
+/* ── Markdown code blocks ── */
+body {
+  --dsw-alias-markdown-code-block:        #141620;
+  --dsw-alias-markdown-code-block-banner: #1a1d27;
+  --dsw-alias-markdown-inline-code:       #1e2030;
+}
+
+/* ── Interactive hover/active ── */
+body {
+  --dsw-alias-interactive-bg-hover:        rgba(255, 255, 255, 0.06);
+  --dsw-alias-interactive-bg-active:       rgba(255, 255, 255, 0.10);
+  --dsw-alias-interactive-bg-hover-accent: rgba(99, 102, 241, 0.12);
+}
+
+/* ── Buttons ── */
+body {
+  --dsw-alias-button-info-fill:   #6366f1;
+  --dsw-alias-button-info-hover:  #818cf8;
+}
+
+/* ── Scrollbar ── */
+body {
+  --dsw-alias-scrollbar-bg-l1:   rgba(255, 255, 255, 0.08);
+  --dsw-alias-scrollbar-bg-l2:   rgba(255, 255, 255, 0.06);
+  --dsw-alias-scrollbar-hover-l1: rgba(255, 255, 255, 0.14);
+  --dsw-alias-scrollbar-hover-l2: rgba(255, 255, 255, 0.12);
+}
+
+/* ── Toast / Tooltip ── */
+body {
+  --dsw-alias-toast-bg:   #1e2030;
+  --dsw-alias-tooltip-bg: #1e2030;
+}
+
+/* ── Shadows (deeper for dark theme) ── */
+body {
+  --dsw-shadow-lv1:      0 2px 4px 0 rgba(0, 0, 0, 0.3);
+  --dsw-shadow-lv1-blur: 0 4px 12px 0 rgba(0, 0, 0, 0.2);
+  --dsw-shadow-lv2:      0 4px 12px 0 rgba(0, 0, 0, 0.2), 0 2px 8px 0 rgba(0, 0, 0, 0.3);
+  --dsw-shadow-lv3:      0 0 1px 0 rgba(0, 0, 0, 0.5), 0 0 4px 0 rgba(0, 0, 0, 0.2), 0 12px 32px 0 rgba(0, 0, 0, 0.4);
+}
+
+/* ── Input surfaces ── */
+body {
+  --dsw-specific-input-major: #1a1d27;
+  --dsw-specific-selector:    #222536;
+  --dsw-specific-tip:         #1e2030;
+}

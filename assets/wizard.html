@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 100vw; height: 100vh;
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    user-select: none;
+  }
+  /* ── Titlebar ── */
+  .titlebar {
+    height: 40px; flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px 0 16px;
+    -webkit-app-region: drag;
+    background: #131722;
+    border-bottom: 1px solid #1e2433;
+  }
+  .titlebar .app-title { font-size: 13px; font-weight: 600; color: #cbd5e1; }
+  .titlebar .close-btn {
+    -webkit-app-region: no-drag;
+    width: 28px; height: 28px; border: none; border-radius: 6px;
+    background: transparent; color: #64748b; font-size: 16px; cursor: pointer;
+  }
+  .titlebar .close-btn:hover { background: #ef4444; color: #fff; }
+  /* ── Steps indicator ── */
+  .steps {
+    flex: none; display: flex; align-items: center; justify-content: center;
+    padding: 14px 20px 4px; gap: 4px;
+  }
+  .step-dot {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: #475569; white-space: nowrap;
+  }
+  .step-dot .circle {
+    width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: #1e2433; color: #64748b; font-size: 11px;
+    border: 1px solid #2a3348;
+  }
+  .step-dot.active { color: #a5b4fc; }
+  .step-dot.active .circle { background: #6366f1; color: #fff; border-color: #6366f1; }
+  .step-dot.done { color: #4ade80; }
+  .step-dot.done .circle { background: #16a34a; color: #fff; border-color: #16a34a; }
+  .step-line { width: 26px; height: 1px; background: #2a3348; flex: none; }
+  /* ── Content ── */
+  .content {
+    flex: 1; overflow-y: auto; padding: 18px 28px 22px;
+  }
+  .card {
+    background: #151a26; border: 1px solid #222b3d; border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: #e2e8f0; }
+  .muted { color: #64748b; font-size: 12px; }
+  .path-box {
+    background: #0d1117; border: 1px solid #222b3d; border-radius: 8px;
+    padding: 10px 12px; font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 12px; color: #93c5fd; word-break: break-all; margin: 8px 0;
+  }
+  .btn-row { display: flex; gap: 10px; margin-top: 14px; }
+  .btn {
+    flex: 1; padding: 10px 14px; border: none; border-radius: 8px;
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s;
+    color: #fff;
+  }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-primary { background: #6366f1; }
+  .btn-primary:hover:not(:disabled) { background: #4f52e0; }
+  .btn-success { background: #16a34a; }
+  .btn-success:hover:not(:disabled) { background: #15803d; }
+  .btn-ghost { background: #222b3d; color: #cbd5e1; }
+  .btn-ghost:hover:not(:disabled) { background: #2a3348; }
+  .btn-danger { background: #dc2626; }
+  .btn-danger:hover:not(:disabled) { background: #b91c1c; }
+  .btn-small { flex: none; padding: 6px 12px; font-size: 12px; }
+  /* ── Env list ── */
+  .env-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 6px; border-bottom: 1px solid #1e2433; font-size: 13px;
+  }
+  .env-item:last-child { border-bottom: none; }
+  .env-ico {
+    width: 22px; height: 22px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+  }
+  .env-ico.ok { background: #16a34a; color: #fff; }
+  .env-ico.bad { background: #dc2626; color: #fff; }
+  .env-ico.warn { background: #d97706; color: #fff; }
+  .env-name { font-weight: 600; width: 88px; flex: none; }
+  .env-ver { color: #94a3b8; font-family: Consolas, monospace; font-size: 12px; }
+  .env-detail { flex: 1; text-align: right; color: #94a3b8; font-size: 12px; }
+  .env-detail.err { color: #f87171; }
+  /* ── Source choice ── */
+  .source-grid { display: flex; gap: 12px; }
+  .source-card {
+    flex: 1; border: 1px solid #222b3d; border-radius: 10px;
+    padding: 18px 16px; cursor: pointer; background: #151a26;
+    transition: border-color .15s, background .15s;
+  }
+  .source-card:hover:not(.disabled) { border-color: #6366f1; background: #1a2030; }
+  .source-card.disabled { opacity: .4; cursor: not-allowed; }
+  .source-card .emoji { font-size: 26px; margin-bottom: 10px; }
+  .source-card h4 { font-size: 14px; margin-bottom: 6px; color: #e2e8f0; }
+  .source-card p { font-size: 12px; color: #64748b; line-height: 1.6; }
+  .source-card .tag {
+    display: inline-block; margin-top: 8px; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; background: #1e293b; color: #94a3b8;
+  }
+  /* ── Running / progress ── */
+  .progress-track {
+    height: 6px; background: #1e2433; border-radius: 3px; overflow: hidden; margin: 14px 0 8px;
+  }
+  .progress-bar {
+    height: 100%; width: 0%; background: #6366f1; border-radius: 3px;
+    transition: width .4s ease;
+  }
+  .status-line { font-size: 13px; color: #a5b4fc; min-height: 20px; margin: 6px 0; }
+  .log-box {
+    background: #0d1117; border: 1px solid #1e2433; border-radius: 8px;
+    height: 220px; overflow-y: auto; padding: 10px 12px; margin-top: 8px;
+    font-family: 'Cascadia Code', Consolas, monospace; font-size: 11px;
+    line-height: 1.7; color: #64748b; user-select: text;
+  }
+  .log-box .step { color: #93c5fd; }
+  .log-box .err { color: #f87171; }
+  /* ── Error ── */
+  .error-banner {
+    background: rgba(220, 38, 38, .12); border: 1px solid rgba(220, 38, 38, .4);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  .error-banner h3 { color: #f87171; font-size: 14px; margin-bottom: 8px; }
+  .error-banner pre {
+    font-family: Consolas, monospace; font-size: 11px; color: #fca5a5;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.6;
+    max-height: 150px; overflow-y: auto; user-select: text;
+  }
+  /* ── Done ── */
+  .done-ico {
+    width: 64px; height: 64px; border-radius: 50%; margin: 18px auto 14px;
+    background: #16a34a; display: flex; align-items: center; justify-content: center;
+    font-size: 30px; color: #fff;
+  }
+  .done-title { text-align: center; font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+  .done-sub { text-align: center; font-size: 12px; color: #64748b; margin-bottom: 20px; }
+  .hidden { display: none !important; }
+  .center { text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <span class="app-title">DeepSeek Studio — 初始化向导</span>
+  <button class="close-btn" id="closeBtn" title="关闭">✕</button>
+</div>
+
+<div class="steps" id="steps">
+  <div class="step-dot active" data-step="0"><span class="circle">1</span>工作目录</div>
+  <div class="step-line"></div>
+  <div class="step-dot" data-step="1"><span class="circle">2</span>环境检测</div>
+  <div class="step-line"></div>
+  <div class="step-dot" data-step="2"><span class="circle">3</span>来源选择</div>
+  <div class="step-line"></div>
+  <div class="step-dot" data-step="3"><span class="circle">4</span>初始化</div>
+  <div class="step-line"></div>
+  <div class="step-dot" data-step="4"><span class="circle">5</span>完成</div>
+</div>
+
+<div class="content" id="content">
+
+  <!-- 步骤 1：工作目录 -->
+  <div id="view-welcome">
+    <div class="card">
+      <h3>欢迎使用 DeepSeek Studio</h3>
+      <p class="muted">首次运行需要准备官方 deepseek-harness 代码。代码将保存在下面的文件夹中（exe 所在目录），以后每次启动都会自动检查并更新。</p>
+      <div class="path-box" id="wsPath"></div>
+      <div class="btn-row">
+        <button class="btn btn-ghost btn-small" id="openExeDirBtn">打开 exe 所在目录</button>
+        <button class="btn btn-primary" id="startBtn">开始</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 2：环境检测 -->
+  <div id="view-env" class="hidden">
+    <div class="card">
+      <h3>环境检测</h3>
+      <div id="envList"></div>
+      <p class="muted" id="envNote"></p>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="envBackBtn">上一步</button>
+        <button class="btn btn-primary" id="envNextBtn">下一步</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 3：来源选择 -->
+  <div id="view-source" class="hidden">
+    <div class="card">
+      <h3>选择代码来源</h3>
+      <div class="source-grid">
+        <div class="source-card" id="srcGithub">
+          <div class="emoji">🐙</div>
+          <h4>从 GitHub 拉取</h4>
+          <p>自动下载官方最新代码（需要 Git 与网络，首次约需几分钟）。</p>
+          <span class="tag" id="githubTag">推荐</span>
+        </div>
+        <div class="source-card" id="srcZip">
+          <div class="emoji">📦</div>
+          <h4>从 ZIP 复制</h4>
+          <p>使用你已经下载好的官方 zip，解压后把内容复制到工作目录。</p>
+          <span class="tag">离线可用</span>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="srcBackBtn">上一步</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 4a：GitHub 执行 -->
+  <div id="view-github" class="hidden">
+    <div class="card">
+      <h3>从 GitHub 初始化</h3>
+      <div class="status-line" id="ghStatus">正在检测网络...</div>
+      <div class="progress-track"><div class="progress-bar" id="ghBar"></div></div>
+      <div class="log-box" id="ghLog"></div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="ghBackBtn">取消</button>
+        <button class="btn btn-primary hidden" id="ghRetryBtn">重试</button>
+        <button class="btn btn-ghost hidden" id="ghToZipBtn">改用 ZIP 方式</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 4b：ZIP 执行 -->
+  <div id="view-zip" class="hidden">
+    <div class="card">
+      <h3>从 ZIP 复制</h3>
+      <p class="muted">请按以下步骤操作：</p>
+      <ol style="font-size:13px;color:#cbd5e1;line-height:2;margin:10px 0 6px 18px;">
+        <li>打开下面的工作目录（<b>exe 所在目录下的 deepseek-harness 文件夹</b>）</li>
+        <li>把你下载的官方 zip 解压，<b>把解压后的内容</b>（含 package.json 的那一层）复制进去</li>
+        <li>复制完成后，点击「我已复制完成，继续」</li>
+      </ol>
+      <div class="path-box" id="zipPath"></div>
+      <div class="status-line" id="zipStatus"></div>
+      <div class="progress-track hidden" id="zipBarWrap"><div class="progress-bar" id="zipBar"></div></div>
+      <div class="log-box hidden" id="zipLog"></div>
+      <div id="zipErrors" class="error-banner hidden"></div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="zipBackBtn">上一步</button>
+        <button class="btn btn-ghost btn-small" id="zipOpenBtn">打开工作目录</button>
+        <button class="btn btn-primary" id="zipContinueBtn">我已复制完成，继续</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 5：完成 -->
+  <div id="view-done" class="hidden">
+    <div class="card center">
+      <div class="done-ico">✓</div>
+      <div class="done-title">初始化完成</div>
+      <div class="done-sub">代码已就绪，点击下方按钮进入应用</div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="doneBtn">进入应用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 错误页 -->
+  <div id="view-error" class="hidden">
+    <div class="error-banner">
+      <h3 id="errTitle">操作失败</h3>
+      <pre id="errDetail"></pre>
+    </div>
+    <div class="card">
+      <h3>最近日志</h3>
+      <div class="log-box" id="errLog" style="height:150px;"></div>
+      <div class="btn-row">
+        <button class="btn btn-ghost btn-small" id="errOpenLogsBtn">打开日志文件夹</button>
+        <button class="btn btn-ghost" id="errBackBtn">返回</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const { ipcRenderer } = require('electron');
+  const $ = (id) => document.getElementById(id);
+  const api = {
+    getState: () => ipcRenderer.invoke('wizard:get-state'),
+    checkNetwork: () => ipcRenderer.invoke('wizard:check-network'),
+    clone: () => ipcRenderer.invoke('wizard:clone'),
+    verifyZip: () => ipcRenderer.invoke('wizard:verify-zip'),
+    gitify: () => ipcRenderer.invoke('wizard:gitify'),
+    ready: () => ipcRenderer.invoke('wizard:ready'),
+    openLogs: () => ipcRenderer.invoke('wizard:open-logs'),
+    openWorkspace: () => ipcRenderer.invoke('wizard:open-workspace'),
+    openExeDir: () => ipcRenderer.invoke('wizard:open-exe-dir'),
+    done: () => ipcRenderer.send('wizard:done'),
+    cancel: () => ipcRenderer.send('wizard:cancel'),
+  };
+
+  let state = null;
+  const logEls = { clone: null, ready: null };
+  let currentLogEl = null;
+  let stepIndex = 0;
+
+  // ── Step indicator ──
+  function setStep(i) {
+    stepIndex = i;
+    document.querySelectorAll('.step-dot').forEach((el, idx) => {
+      el.classList.toggle('active', idx === i);
+      el.classList.toggle('done', idx < i);
+    });
+  }
+  function showView(id) {
+    for (const v of ['view-welcome','view-env','view-source','view-github','view-zip','view-done','view-error']) {
+      $(v).classList.toggle('hidden', v !== id);
+    }
+  }
+  function addLog(el, text, cls) {
+    if (!el) return;
+    const line = document.createElement('div');
+    line.className = cls || '';
+    line.textContent = text;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // ── Progress stream ──
+  ipcRenderer.on('wizard:progress', (_, { phase, message }) => {
+    const target = phase === 'clone' ? $('ghLog') : (phase === 'gitify' ? $('zipLog') : (currentLogEl || $('ghLog')));
+    if (target) { target.classList.remove('hidden'); addLog(target, message); }
+    const bar = phase === 'clone' ? $('ghBar') : (phase === 'gitify' ? $('zipBar') : (currentLogEl === $('zipLog') ? $('zipBar') : $('ghBar')));
+    if (bar) bar.style.width = '60%';
+  });
+
+  // ── Welcome ──
+  $('closeBtn').onclick = () => api.cancel();
+  $('openExeDirBtn').onclick = () => api.openExeDir();
+  $('startBtn').onclick = async () => {
+    setStep(1); showView('view-env');
+    const s = await api.getState();
+    state = s;
+    $('wsPath').textContent = s.workspace.dir;
+    renderEnv(s.env);
+  };
+
+  function renderEnv(env) {
+    const list = $('envList');
+    list.innerHTML = '';
+    let allOk = true;
+    for (const e of env) {
+      const ok = e.ok;
+      if (!ok) allOk = false;
+      const row = document.createElement('div');
+      row.className = 'env-item';
+      row.innerHTML = `
+        <div class="env-ico ${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✕'}</div>
+        <span class="env-name">${e.label}</span>
+        <span class="env-ver">${e.version}</span>
+        <span class="env-detail ${ok ? '' : 'err'}">${e.detail}</span>`;
+      list.appendChild(row);
+    }
+    $('envNote').textContent = allOk
+      ? '环境检查通过，可以继续。'
+      : '部分项目未通过：Git 缺失时只能使用 ZIP 方式；Node 缺失时无法完成初始化。';
+  }
+
+  $('envBackBtn').onclick = () => { setStep(0); showView('view-welcome'); };
+  $('envNextBtn').onclick = () => { setStep(2); showView('view-source'); renderSource(); };
+
+  function renderSource() {
+    const env = state.env;
+    const gitOk = env.find(e => e.id === 'git').ok;
+    const gh = $('srcGithub');
+    gh.classList.toggle('disabled', !gitOk);
+    $('githubTag').textContent = gitOk ? '推荐' : '需要安装 Git';
+    if (!gitOk) {
+      gh.onclick = null;
+    } else {
+      gh.onclick = () => { setStep(3); showView('view-github'); runGithub(); };
+    }
+    $('srcZip').onclick = () => { setStep(3); showView('view-zip'); $('zipStatus').textContent = ''; };
+  }
+
+  $('srcBackBtn').onclick = () => { setStep(1); showView('view-env'); };
+
+  // ── GitHub flow ──
+  async function runGithub() {
+    $('ghLog').innerHTML = ''; $('ghBar').style.width = '5%';
+    $('ghStatus').textContent = '正在检测网络...';
+    $('ghRetryBtn').classList.add('hidden'); $('ghToZipBtn').classList.add('hidden');
+    currentLogEl = $('ghLog');
+    try {
+      const net = await api.checkNetwork();
+      if (!net.ok) { fail('无法连接 GitHub', '网络检测未通过。请检查网络或代理设置，也可以改用 ZIP 方式。'); $('ghToZipBtn').classList.remove('hidden'); return; }
+      addLog($('ghLog'), '网络检测通过，开始拉取官方源码...', 'step');
+      $('ghBar').style.width = '20%';
+      $('ghStatus').textContent = '拉取官方源码...';
+      const clone = await api.clone();
+      if (!clone.ok) { fail('拉取失败', clone.error); $('ghToZipBtn').classList.remove('hidden'); return; }
+      $('ghBar').style.width = '60%';
+      $('ghStatus').textContent = '安装依赖并构建（首次需要几分钟）...';
+      addLog($('ghLog'), '源码就绪，开始安装依赖与构建...', 'step');
+      const ready = await api.ready();
+      if (!ready.ok) { fail('初始化失败', ready.error); $('ghRetryBtn').classList.remove('hidden'); return; }
+      $('ghBar').style.width = '100%';
+      finish();
+    } catch (err) {
+      fail('初始化异常', String(err && err.message || err));
+    }
+  }
+
+  $('ghRetryBtn').onclick = () => runGithub();
+  $('ghToZipBtn').onclick = () => { setStep(3); showView('view-zip'); };
+  $('ghBackBtn').onclick = () => { setStep(2); showView('view-source'); };
+
+  // ── ZIP flow ──
+  $('zipOpenBtn').onclick = () => api.openWorkspace();
+  $('zipContinueBtn').onclick = async () => {
+    $('zipErrors').classList.add('hidden');
+    $('zipStatus').textContent = '正在校验目录...';
+    const v = await api.verifyZip();
+    if (!v.ok) {
+      $('zipStatus').textContent = '校验未通过，请修正后重试：';
+      $('zipErrors').classList.remove('hidden');
+      $('zipErrors').innerHTML = '<h3>目录结构不正确</h3><pre>' + v.errors.join('\n') + '</pre>';
+      return;
+    }
+    $('zipStatus').textContent = '目录校验通过';
+    $('zipBarWrap').classList.remove('hidden');
+    $('zipLog').classList.remove('hidden');
+    $('zipLog').innerHTML = '';
+    $('zipBar').style.width = '10%';
+    currentLogEl = $('zipLog');
+    try {
+      addLog($('zipLog'), '目录校验通过，开始接入 Git...', 'step');
+      const g = await api.gitify();
+      $('zipBar').style.width = '40%';
+      $('zipStatus').textContent = '安装依赖并构建（首次需要几分钟）...';
+      addLog($('zipLog'), '开始安装依赖与构建...', 'step');
+      const ready = await api.ready();
+      if (!ready.ok) { fail('初始化失败', ready.error); $('ghRetryBtn').classList.remove('hidden'); return; }
+      $('zipBar').style.width = '100%';
+      $('zipStatus').textContent = '初始化完成';
+      finish();
+    } catch (err) {
+      fail('初始化异常', String(err && err.message || err));
+    }
+  };
+
+  $('zipBackBtn').onclick = () => { setStep(2); showView('view-source'); };
+
+  // ── Shared ──
+  function finish() {
+    setStep(4); showView('view-done');
+  }
+  function fail(title, detail) {
+    setStep(3);
+    $('errTitle').textContent = title;
+    $('errDetail').textContent = detail;
+    const logBox = $('errLog');
+    logBox.innerHTML = '';
+    const lines = (currentLogEl ? currentLogEl.innerText : '').split('\n').slice(-30);
+    for (const l of lines) addLog(logBox, l);
+    showView('view-error');
+  }
+  $('errOpenLogsBtn').onclick = () => api.openLogs();
+  $('errBackBtn').onclick = () => { setStep(2); showView('view-source'); };
+  $('doneBtn').onclick = () => api.done();
+
+  // ── Init ──
+  (async () => {
+    const s = await api.getState();
+    state = s;
+    $('wsPath').textContent = s.workspace.dir;
+    $('zipPath').textContent = s.workspace.dir;
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output (compiled from src/ by tsc)
+lib/
+lib-new/
+dist/
+dist-*/
+*.tsbuildinfo
+
+# Packaged artifacts
+*.exe
+*.dmg
+*.AppImage
+*.snap
+*.deb
+*.rpm
+
+# Logs
+logs/
+*.log
+proc-check.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local env
+.env
+.env.local

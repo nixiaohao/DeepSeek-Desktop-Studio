@@ -1,0 +1,9 @@
+[
+  {
+    "id": "default",
+    "name": "DeepSeek Dark",
+    "description": "Indigo-accent dark theme",
+    "file": "default.css",
+    "colorScheme": "dark"
+  }
+]
