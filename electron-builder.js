@@ -2,6 +2,48 @@ const { join } = require('node:path')
 const { execFileSync } = require('node:child_process')
 
 /**
+ * @pnpm/exe pulls a standalone SEA binary for every platform through
+ * optionalDependencies. Only the host platform's package is needed at
+ * runtime (dist/pnpm.mjs resolves it by process.platform+arch); exclude the
+ * others so we don't ship ~600MB of dead weight for every platform.
+ *
+ * The exclude globs below list ALL platform packages and then drop the ones
+ * that match the current build host, so cross-platform builds (e.g. an
+ * AppImage built inside a Linux container on Windows) include the Linux SEA
+ * binary instead of the Windows one. These patterns MUST stay exact (no bare
+ * linux / macos / win- wildcards) so they never accidentally re-include a
+ * package excluded here.
+ */
+const isWin = process.platform === 'win32'
+const isLinux = process.platform === 'linux'
+const isMac = process.platform === 'darwin'
+
+const pnpmPlatformExcludes = [
+  '!node_modules/@pnpm/win-arm64/**/*',
+  '!node_modules/@pnpm/win-x64/**/*',
+  '!node_modules/@pnpm/linux-arm64/**/*',
+  '!node_modules/@pnpm/linux-x64/**/*',
+  '!node_modules/@pnpm/linuxstatic-arm64/**/*',
+  '!node_modules/@pnpm/linuxstatic-x64/**/*',
+  '!node_modules/@pnpm/macos-arm64/**/*',
+  '!node_modules/@pnpm/macos-x64/**/*',
+].filter((pattern) => {
+  // Keep excludes only for platforms OTHER than the build host.
+  if (isWin && pattern.includes('/win-')) return false
+  if (isLinux && (pattern.includes('/linux') || pattern.includes('/linuxstatic'))) return false
+  if (isMac && pattern.includes('/macos')) return false
+  return true
+})
+
+// Native SEA binaries must live OUTSIDE the asar (asar files cannot be
+// spawned as executables). Keep the host platform's package next to
+// @pnpm/exe so dist/pnpm.mjs can resolve it at runtime.
+const pnpmUnpack = ['node_modules/@pnpm/exe/**/*']
+if (isWin) pnpmUnpack.push('node_modules/@pnpm/win-x64/**/*')
+if (isLinux) pnpmUnpack.push('node_modules/@pnpm/linux-x64/**/*', 'node_modules/@pnpm/linuxstatic-x64/**/*')
+if (isMac) pnpmUnpack.push('node_modules/@pnpm/macos-x64/**/*', 'node_modules/@pnpm/macos-arm64/**/*')
+
+/**
  * electron-builder skips rcedit when `signAndEditExecutable: false`, so the
  * exe ends up with the default Electron icon. This hook re-applies the app
  * icon after the unpacked exe is produced (before portable packaging).
@@ -22,24 +64,17 @@ module.exports = {
     'lib-new/**/*',
     'assets/**/*',
     'themes/**/*',
-    // @pnpm/exe pulls SEA binaries for every platform via optionalDependencies.
-    // Only the host platform's package is needed at runtime (dist/pnpm.mjs
-    // resolves it by process.platform+arch); exclude the rest to avoid
-    // shipping ~600MB of dead weight in the installer.
-    '!node_modules/@pnpm/win-arm64/**/*',
-    '!node_modules/@pnpm/linux*/**/*',
-    '!node_modules/@pnpm/linuxstatic*/**/*',
-    '!node_modules/@pnpm/macos*/**/*',
+    // @pnpm/exe pulls SEA binaries for every platform; keep only the build
+    // host's package (see pnpmPlatformExcludes above) to avoid shipping
+    // ~600MB of dead weight for every platform.
+    ...pnpmPlatformExcludes,
   ],
   // @pnpm/exe bundles a native SEA binary that must live OUTSIDE the asar
   // (asar files cannot be spawned as executables). electron-builder copies
   // matched paths to app.asar.unpacked/ keeping the same relative tree.
   // NOTE: keep these patterns EXACT (no linux*/macos*/win-* wildcards) so they
   // don't re-include platform packages excluded by `files` above.
-  asarUnpack: [
-    'node_modules/@pnpm/exe/**/*',
-    'node_modules/@pnpm/win-x64/**/*',
-  ],
+  asarUnpack: pnpmUnpack,
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   afterPack,
   win: {
