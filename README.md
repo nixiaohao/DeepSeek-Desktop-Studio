@@ -167,3 +167,15 @@ Windows 构建目标为 `portable`（单个自包含 exe）。由于受限环境
 [MIT](LICENSE)
 
 本项目构建于 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（MIT © 2026 DeepSeek）之上。完整文本见 `LICENSE`。
+
+## Changelog / 更新日志
+
+### v0.1.0 — 2026-08-22
+
+**English**
+- Fixed: the first-run wizard window no longer stays open after clicking "Launch" — it now closes itself once the main window starts.
+- Fixed: the second launch failed with `DSH_CLIENT_COMMIT_HASH must be a Git commit hash; got ""`. The wizard now injects the resolved HEAD commit hash into the build environment, so the first build succeeds and subsequent launches skip rebuilding (cached).
+
+**中文**
+- 修复：首次启动向导在点击「启动程序」后不再残留开启——主窗口启动后，向导窗口会自动关闭。
+- 修复：第二次启动时报错 `DSH_CLIENT_COMMIT_HASH must be a Git commit hash; got ""`。现在向导会在构建环境中显式注入解析到的 HEAD 提交哈希，首次构建成功后，后续启动将跳过重建（已缓存）。
