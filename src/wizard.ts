@@ -79,8 +79,14 @@ export async function runWizard(workspace: WorkspaceInfo): Promise<boolean> {
   const hOpenLogs = () => shell.openPath(getLogDir())
   const hOpenWorkspace = () => shell.openPath(workspace.dir)
   const hOpenExeDir = () => shell.openPath(getExeDir())
-  const hDone = () => { cleanup(); settle(true) }
-  const hCancel = () => { cleanup(); settle(false) }
+  // Closing the wizard window is mandatory: runWizard() resolves only after
+  // this handler fires, and the caller (main.ts) immediately creates the splash
+  // + main window. If the wizard BrowserWindow survives, it stays on top of the
+  // app forever ("向导关不掉"). settle() is idempotent (guarded by `settled`),
+  // so the `closed` -> settle(false) listener that fires after win.close() is a
+  // harmless no-op.
+  const hDone = () => { cleanup(); settle(true); win?.close() }
+  const hCancel = () => { cleanup(); settle(false); win?.close() }
 
   let resolveResult!: (v: boolean) => void
   let settled = false

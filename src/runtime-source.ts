@@ -173,19 +173,33 @@ export class RuntimeSource {
    * HEAD, which would crash the build. We inject a stable hash into the
    * environment so the build can proceed without a real Git commit.
    */
+  /**
+   * Ensure DSH_CLIENT_COMMIT_HASH is populated in process.env before the build
+   * runs. The harness build script reads this env var and treats an empty value
+   * as "no commit" — it does NOT fall back to `git rev-parse HEAD` reliably in
+   * the spawned child, so we must inject a real hash here.
+   *
+   * Order: real git HEAD → lock-hash.txt → deterministic package.version hash.
+   * The git branch previously just `return`ed when rev-parse succeeded, leaving
+   * the env var empty and crashing the build with `got ""` — now it writes the
+   * resolved hash explicitly.
+   */
   private ensureBuildCommitHash(): void {
     if (process.env[CLIENT_COMMIT_HASH_VAR]) return
     const git = this.getGit()
     if (git) {
       try {
-        execFileSync(git.path, ['rev-parse', 'HEAD'], {
+        const out = execFileSync(git.path, ['rev-parse', 'HEAD'], {
           cwd: this.dir,
           encoding: 'utf-8',
           timeout: 15_000,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'ignore'],
-        })
-        return
+        }).trim()
+        if (/^[0-9a-f]{7,40}$/i.test(out)) {
+          process.env[CLIENT_COMMIT_HASH_VAR] = out
+          return
+        }
       } catch { /* no HEAD — inject fallback */ }
     }
     // Fallback 1: lock-hash.txt (SHA-1 of pnpm-lock.yaml written after install)
@@ -203,7 +217,9 @@ export class RuntimeSource {
         version?: string
       }
       const seed = `${pkg.name ?? 'deepseek-harness'}@${pkg.version ?? '0.0.0'}`
-      process.env[CLIENT_COMMIT_HASH_VAR] = createHash('sha1').update(seed).digest('hex')
+      process.env[
+        CLIENT_COMMIT_HASH_VAR
+      ] = createHash('sha1').update(seed).digest('hex')
     } catch { /* best-effort */ }
   }
 
