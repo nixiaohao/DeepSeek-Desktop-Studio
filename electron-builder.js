@@ -1,6 +1,6 @@
 const { join } = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { chmodSync, existsSync } = require('node:fs')
+const { chmodSync, existsSync, renameSync, writeFileSync } = require('node:fs')
 
 /**
  * @pnpm/exe pulls a standalone SEA binary for every platform through
@@ -59,14 +59,38 @@ async function afterPack(context) {
     return
   }
   if (electronPlatformName === 'linux') {
-    // Make chrome-sandbox setuid-root so the SUID sandbox path is correctly
-    // configured on distros that disable unprivileged user namespaces
-    // (Ubuntu 24.04+/Resolute). Combined with the --no-sandbox /
-    // --disable-setuid-sandbox switches added in main.ts, the AppImage then
-    // launches directly without manual flags. Built as root in the container
-    // so the bit survives into the squashfs and stays root:root on the host.
-    const sandbox = join(appOutDir, 'chrome-sandbox')
-    if (existsSync(sandbox)) chmodSync(sandbox, 0o4755)
+    // Force --no-sandbox onto the REAL process argv by wrapping the Electron
+    // ELF launcher with a shell script. Why this is necessary and reliable:
+    //
+    //  * The SUID sandbox cannot run on distros that disable unprivileged user
+    //    namespaces (Ubuntu 24.04+/Resolute) or inside VM/container sandboxes:
+    //    even though electron-builder ships chrome-sandbox as setuid (04755),
+    //    the AppImage FUSE mount strips the setuid bit at runtime, so Chromium
+    //    aborts with "SUID sandbox helper ... not configured correctly" (or,
+    //    when the bit survives, "setuid sandbox is not running as root" +
+    //    namespace failures).
+    //  * app.commandLine.appendSwitch('no-sandbox') in main.ts is NOT honored
+    //    for the early SUID/zygote path (Electron's C++ bootstrap reads argv
+    //    before the JS switch is applied). A user who runs the AppImage with a
+    //    manual `--no-sandbox` works fine — because the flag is then truly on
+    //    the process command line.
+    //
+    // The wrapper reproduces exactly that manual flag, so it is guaranteed to
+    // take effect and the AppImage launches with a double-click / plain
+    // `./AppImage` on every distro, with no manual flags and no system deps
+    // beyond the usual Electron shared libraries.
+    const exe = context.packager.executableName
+    const exePath = join(appOutDir, exe)
+    const realPath = join(appOutDir, `${exe}.bin`)
+    if (existsSync(exePath)) {
+      renameSync(exePath, realPath)
+      const wrapper =
+        '#!/bin/sh\n' +
+        'HERE="$(dirname "$(readlink -f "${0}")")"\n' +
+        'exec "${HERE}/' + exe + '.bin" --no-sandbox --disable-setuid-sandbox "$@"\n'
+      writeFileSync(exePath, wrapper)
+      chmodSync(exePath, 0o755)
+    }
   }
 }
 
