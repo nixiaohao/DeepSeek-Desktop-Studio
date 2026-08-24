@@ -799,9 +799,13 @@ export class RuntimeSource {
    * The "native" loader keeps import.meta.url intact and works on every
    * Node this repository supports (engines floor ^22.19 || >=24 — all
    * strip TypeScript natively). We probe the build node for
-   * process.features.typescript and force "native" when present; otherwise
-   * we write a plain passthrough wrapper (auto loader, upstream behavior
-   * for nodes that cannot build this workspace anyway).
+   * process.features.typescript and force "native" when present. When the
+   * probe reports no stripping but the node accepts
+   * --experimental-strip-types (distro builds that compile the feature in
+   * yet disable it by default), the wrapper passes that flag so "native"
+   * works anyway. Only when neither works do we write a plain passthrough
+   * wrapper (auto loader, upstream behavior for nodes that cannot build
+   * this workspace anyway).
    *
    * The wrapper is ALWAYS written, even as a passthrough: older app
    * versions forced the broken "tsx" loader into this file, and every
@@ -834,23 +838,55 @@ export class RuntimeSource {
       const node = resolveNodeBin()
       // Probe the actual build node — NOT the Electron host process — for
       // native TypeScript support. Only that node loads the tsdown configs.
-      let loaderFlag = ''
-      try {
-        const probeEnv: NodeJS.ProcessEnv = { ...process.env }
-        if (node.useElectron) probeEnv.ELECTRON_RUN_AS_NODE = '1'
-        const probe = execFileSync(
-          node.path,
-          ['-p', 'process.features.typescript'],
-          { encoding: 'utf-8', timeout: 15_000, env: probeEnv },
-        ).trim()
-        if (probe) loaderFlag = ' --config-loader native'
-        log('launcher', `createTsdownWrapper: node probe features.typescript=${probe || 'none'}`)
-      } catch (err) {
-        log(
-          'launcher',
-          `createTsdownWrapper: node probe failed (${(err as Error).message.slice(0, 120)}), keeping auto loader`,
-        )
+      //
+      // `-p process.features.typescript` prints the *string* "false" when
+      // stripping is disabled and "undefined" on Node 20 — both truthy as
+      // strings, so they must be compared explicitly (a plain `if (probe)`
+      // once forced "native" onto a no-strip Node and the build died with
+      // ERR_UNKNOWN_FILE_EXTENSION ".ts").
+      const probeEnv: NodeJS.ProcessEnv = { ...process.env }
+      if (node.useElectron) probeEnv.ELECTRON_RUN_AS_NODE = '1'
+      const probeNative = (nodeArgs: string[]): string | null => {
+        try {
+          return execFileSync(
+            node.path,
+            [...nodeArgs, '-p', 'process.features.typescript'],
+            { encoding: 'utf-8', timeout: 15_000, env: probeEnv },
+          ).trim()
+        } catch {
+          // Non-zero exit: the node rejected the arguments (unknown flag).
+          return null
+        }
       }
+      const nativeEnabled = (value: string | null): boolean =>
+        value !== null && value !== '' && value !== 'false' && value !== 'undefined'
+
+      let loaderFlag = ''
+      let nodeFlags = ''
+      const direct = probeNative([])
+      if (nativeEnabled(direct)) {
+        loaderFlag = ' --config-loader native'
+      } else {
+        // Some Node builds ship type stripping compiled in but disabled by
+        // default (observed on the user's VM: Node 22.22.1 with
+        // features.typescript === false). "native" is the ONLY tsdown
+        // config loader that can build this workspace: "unrun" bundles
+        // configs with rolldown, which folds import.meta.url onto the entry
+        // config path and breaks REPOSITORY_ROOT in tsdown.client.ts
+        // ("no packages/*/*/package.json declares the name …"), and "tsx"
+        // cannot load workspace subpackage configs at all. Try to switch
+        // stripping on explicitly; nodes without the flag keep auto.
+        const flagged = probeNative(['--experimental-strip-types'])
+        if (nativeEnabled(flagged)) {
+          nodeFlags = ' --experimental-strip-types'
+          loaderFlag = ' --config-loader native'
+        }
+      }
+      log(
+        'launcher',
+        `createTsdownWrapper: node probe features.typescript=${direct ?? 'error'}` +
+          `${nodeFlags ? ' (strip forced via --experimental-strip-types)' : ''}`,
+      )
       // NODE_PATH must include tsdown's own node_modules so its
       // dependencies resolve from the pnpm virtual store. The three
       // segments mirror the pnpm cmd-shim that `pnpm install` generates.
@@ -867,7 +903,7 @@ export class RuntimeSource {
         writeFileSync(
           wrapperPath,
           `@SETLOCAL\r\n@SET "NODE_PATH=${nodePath}"\r\n` +
-          `"${node.path}" "${runMjs}"${loaderFlag} %*\r\n`,
+          `"${node.path}"${nodeFlags} "${runMjs}"${loaderFlag} %*\r\n`,
           'utf-8',
         )
       } else {
@@ -875,14 +911,14 @@ export class RuntimeSource {
         writeFileSync(
           wrapperPath,
           `#!/bin/sh\nexport NODE_PATH="${nodePath}"\n` +
-          `exec "${node.path}" "${runMjs}"${loaderFlag} "$@"\n`,
+          `exec "${node.path}"${nodeFlags} "${runMjs}"${loaderFlag} "$@"\n`,
           'utf-8',
         )
         try { chmodSync(wrapperPath, 0o755) } catch { /* best-effort */ }
       }
       log(
         'launcher',
-        `createTsdownWrapper: wrapper -> ${node.path} ${runMjs}${loaderFlag || ' (auto loader)'}`,
+        `createTsdownWrapper: wrapper -> ${node.path}${nodeFlags} ${runMjs}${loaderFlag || ' (auto loader)'}`,
       )
       return wrapperDir
     } catch (err) {
