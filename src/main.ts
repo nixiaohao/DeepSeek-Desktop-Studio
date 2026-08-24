@@ -93,7 +93,8 @@ function createMainWindow(port: number): BrowserWindow {
     minWidth: 1024,
     minHeight: 680,
     title: 'DeepSeek Studio',
-    icon: join(app.getAppPath(), 'assets', 'icon.ico'),
+    // Windows uses the multi-resolution .ico; Linux/macOS need .png.
+    icon: join(app.getAppPath(), 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     show: false,
     backgroundColor: '#0f1117',
     webPreferences: {

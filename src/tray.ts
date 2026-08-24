@@ -13,7 +13,8 @@ export function createTray(
   onQuit: () => void,
 ) {
   // Use app.getAppPath() for reliable path resolution in both dev and packaged modes
-  const iconPath = join(app.getAppPath(), 'assets', 'icon.ico')
+  const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
+  const iconPath = join(app.getAppPath(), 'assets', iconFile)
   let icon: Electron.NativeImage
   try {
     icon = nativeImage.createFromPath(iconPath)

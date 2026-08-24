@@ -26,7 +26,7 @@ import {
   buildPath,
   type ToolInfo,
 } from './env-detector.js'
-import { appendChildOutput, isDebug, log, type LogName } from './logging.js'
+import { appendChildOutput, getLogDir, isDebug, log, type LogName } from './logging.js'
 
 const REPO_URL = 'https://github.com/deepseek-ai/deepseek-harness.git'
 const BRANCH = 'master'
@@ -928,6 +928,7 @@ export class RuntimeSource {
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       let stderr = ''
+      let stdout = ''
       const logName: LogName = opts.logName ?? 'wizard'
       let lineBuf = ''
 
@@ -944,6 +945,7 @@ export class RuntimeSource {
 
       proc.stdout?.on('data', (d: Buffer) => {
         const text = d.toString()
+        stdout += text
         appendChildOutput(logName, text)
         lineBuf += text
         const lines = lineBuf.split(/\r?\n/)
@@ -968,7 +970,14 @@ export class RuntimeSource {
         if (timer) clearTimeout(timer)
         if (lineBuf) processLine(lineBuf)
         if (code === 0) resolvePromise()
-        else reject(new Error(`命令执行失败 (exit ${code}): ${stderr.slice(-400)}`))
+        else {
+          const tail = (stdout.slice(-500) + '\n' + stderr.slice(-500)).trim()
+          reject(new Error(
+            `命令执行失败 (exit ${code})。\n` +
+            `最近输出：\n${tail || '(无输出)'}\n\n` +
+            `完整日志：${getLogDir()}`
+          ))
+        }
       })
     })
   }

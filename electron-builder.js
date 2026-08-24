@@ -102,6 +102,7 @@ module.exports = {
     'lib-new/**/*',
     'assets/**/*',
     'themes/**/*',
+    'build/icons/**/*',
     // @pnpm/exe pulls SEA binaries for every platform; keep only the build
     // host's package (see pnpmPlatformExcludes above) to avoid shipping
     // ~600MB of dead weight for every platform.
@@ -131,7 +132,10 @@ module.exports = {
   },
   linux: {
     target: [{ target: 'AppImage', arch: ['x64'] }],
-    icon: 'assets/icon.png',
+    // Multi-size icons for .desktop, taskbar and AppImage itself.
+    // The build/icons/ directory is scanned by electron-builder; naming a
+    // single PNG here produced a generic gear icon in the file manager.
+    icon: 'build/icons/',
     category: 'Development',
   },
   // No native modules to rebuild; speeds up packaging and avoids
