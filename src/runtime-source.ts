@@ -609,6 +609,9 @@ export class RuntimeSource {
     // Refresh the pnpm wrapper so node_modules/.bin/pnpm.cmd points at a
     // persistent workspace copy, not a stale Electron temp extraction path.
     this.createPnpmWrapper()
+    // Overwrite node_modules/.bin/tsdown so every invocation gets
+    // --config-loader tsx (see createTsdownWrapper for why).
+    this.createTsdownWrapper()
 
     const node = resolveNodeBin()
     const pnpmBin = this.ensureBundledPnpmInWorkspace() ?? this.resolvePnpmBin()
@@ -767,6 +770,85 @@ export class RuntimeSource {
       try { chmodSync(wrapperPath, 0o755) } catch { /* best-effort */ }
     }
     return wrapperDir
+  }
+
+  /**
+   * Overwrite node_modules/.bin/tsdown with a wrapper that forces
+   * --config-loader tsx on every invocation.
+   *
+   * tsdown's default config loader is "auto", which resolves to "unrun"
+   * when Node's native TypeScript support is unavailable (Electron's
+   * bundled Node). unrun bundles config files into temp modules under
+   * node_modules/.unrun/, which replaces import.meta.url in imported
+   * modules — tsdown.client.ts computes REPOSITORY_ROOT from
+   * import.meta.url, so it ends up pointing at the temp directory
+   * instead of the workspace root, and workspaceManifest() can't find
+   * any workspace manifests.
+   *
+   * The "tsx" loader uses tsx's ESM loader API (tsImport), which
+   * preserves import.meta.url. The build already loads tsx via
+   * --import tsx/esm, so this loader is always available.
+   *
+   * The wrapper also sets NODE_PATH to the same three directories the
+   * pnpm-generated shim uses, so tsdown's dependencies (rolldown, cac,
+   * ansis, …) resolve from the pnpm virtual store.
+   */
+  private createTsdownWrapper(): string | null {
+    try {
+      const req = createRequire(join(this.dir, 'package.json'))
+      let tsdownPkgPath: string
+      try {
+        tsdownPkgPath = req.resolve('tsdown/package.json')
+      } catch {
+        log('launcher', 'createTsdownWrapper: tsdown not installed, skipping')
+        return null
+      }
+      const tsdownDir = dirname(tsdownPkgPath)
+      const runMjs = join(tsdownDir, 'dist', 'run.mjs')
+      if (!existsSync(runMjs)) {
+        log('launcher', `createTsdownWrapper: ${runMjs} not found, skipping`)
+        return null
+      }
+
+      const wrapperDir = join(this.dir, 'node_modules', '.bin')
+      try { mkdirSync(wrapperDir, { recursive: true }) } catch { /* exists */ }
+
+      const node = resolveNodeBin()
+      // NODE_PATH must include tsdown's own node_modules so its
+      // dependencies resolve from the pnpm virtual store. The three
+      // segments mirror the pnpm cmd-shim that `pnpm install` generates.
+      const sep = process.platform === 'win32' ? ';' : ':'
+      const nodePathSegments = [
+        join(tsdownDir, 'node_modules'),
+        dirname(tsdownDir),
+        join(this.dir, 'node_modules', '.pnpm', 'node_modules'),
+      ]
+      const nodePath = nodePathSegments.join(sep)
+
+      if (process.platform === 'win32') {
+        const wrapperPath = join(wrapperDir, 'tsdown.CMD')
+        writeFileSync(
+          wrapperPath,
+          `@SETLOCAL\r\n@SET "NODE_PATH=${nodePath}"\r\n` +
+          `"${node.path}" "${runMjs}" --config-loader tsx %*\r\n`,
+          'utf-8',
+        )
+      } else {
+        const wrapperPath = join(wrapperDir, 'tsdown')
+        writeFileSync(
+          wrapperPath,
+          `#!/bin/sh\nexport NODE_PATH="${nodePath}"\n` +
+          `exec "${node.path}" "${runMjs}" --config-loader tsx "$@"\n`,
+          'utf-8',
+        )
+        try { chmodSync(wrapperPath, 0o755) } catch { /* best-effort */ }
+      }
+      log('launcher', `createTsdownWrapper: wrapper -> ${runMjs} --config-loader tsx`)
+      return wrapperDir
+    } catch (err) {
+      log('launcher', `createTsdownWrapper: failed: ${(err as Error).message.slice(0, 200)}`)
+      return null
+    }
   }
 
   // ── Plugin market state ──
