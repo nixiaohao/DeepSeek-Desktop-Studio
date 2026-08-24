@@ -27,6 +27,13 @@ import { relaunchApp } from './relaunch.js'
 app.disableHardwareAcceleration()
 app.commandLine.appendSwitch('no-sandbox')
 
+// 在禁用非特权 user namespace 的发行版（Ubuntu 24.04+/Resolute）上，Chromium
+// 会回退到 SUID sandbox 并因 chrome-sandbox 权限不正确而 FATAL。显式关闭
+// setuid sandbox 检查（no-sandbox 已全局设置），双开关确保 AppImage 直接运行。
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('disable-setuid-sandbox')
+}
+
 if (isDebug()) {
   log('launcher', 'DEBUG mode enabled (--debug / DSH_DEBUG=1)')
 }

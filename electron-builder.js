@@ -1,5 +1,6 @@
 const { join } = require('node:path')
 const { execFileSync } = require('node:child_process')
+const { chmodSync, existsSync } = require('node:fs')
 
 /**
  * @pnpm/exe pulls a standalone SEA binary for every platform through
@@ -49,11 +50,24 @@ if (isMac) pnpmUnpack.push('node_modules/@pnpm/macos-x64/**/*', 'node_modules/@p
  * icon after the unpacked exe is produced (before portable packaging).
  */
 async function afterPack(context) {
-  if (context.electronPlatformName !== 'win32') return
-  const rceditExe = join(context.packager.projectDir, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
-  const exePath = join(context.appOutDir, `${context.packager.appInfo.productName}.exe`)
-  const iconPath = join(context.packager.projectDir, 'assets', 'icon.ico')
-  execFileSync(rceditExe, [exePath, '--set-icon', iconPath])
+  const { electronPlatformName, appOutDir } = context
+  if (electronPlatformName === 'win32') {
+    const rceditExe = join(context.packager.projectDir, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
+    const exePath = join(appOutDir, `${context.packager.appInfo.productName}.exe`)
+    const iconPath = join(context.packager.projectDir, 'assets', 'icon.ico')
+    execFileSync(rceditExe, [exePath, '--set-icon', iconPath])
+    return
+  }
+  if (electronPlatformName === 'linux') {
+    // Make chrome-sandbox setuid-root so the SUID sandbox path is correctly
+    // configured on distros that disable unprivileged user namespaces
+    // (Ubuntu 24.04+/Resolute). Combined with the --no-sandbox /
+    // --disable-setuid-sandbox switches added in main.ts, the AppImage then
+    // launches directly without manual flags. Built as root in the container
+    // so the bit survives into the squashfs and stays root:root on the host.
+    const sandbox = join(appOutDir, 'chrome-sandbox')
+    if (existsSync(sandbox)) chmodSync(sandbox, 0o4755)
+  }
 }
 
 module.exports = {
