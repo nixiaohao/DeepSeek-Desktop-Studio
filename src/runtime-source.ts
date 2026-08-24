@@ -619,31 +619,24 @@ export class RuntimeSource {
       throw new Error('未找到 pnpm，无法构建。请安装 pnpm 后重试，或检查安装包完整性。')
     }
 
-    // The workspace build script (scripts/build.ts) needs environment
+    // The workspace build script (scripts/build.ts) needs two environment
     // values that cannot be left to chance:
     // 1. DSH_CLIENT_COMMIT_HASH — ZIP-copied workspaces may have no Git HEAD,
     //    and the build crashes with "git rev-parse HEAD" if this is missing.
     // 2. npm_execpath — build.ts uses it as the package manager. We pass the
     //    same persistent pnpm copy that the wrapper uses, so every nested
     //    "pnpm" invocation resolves to a real file.
-    // 3. NODE_OPTIONS --import tsx/esm — the top-level build.ts gets
-    //    --import tsx/esm on the command line, but child processes spawned
-    //    via npm run (tsdown, tsc) only inherit NODE_OPTIONS, not CLI flags.
-    //    Without this, tsdown's tsImport loads the root config fine, but
-    //    workspace package configs loaded via dynamic import() hit Node's
-    //    native ESM translator and throw SyntaxError on TypeScript syntax.
-    const tsxEsmFlag = '--import tsx/esm'
-    const existingNodeOpts = (process.env.NODE_OPTIONS ?? '').trim()
-    const nodeOptions = existingNodeOpts.includes('tsx/esm')
-      ? existingNodeOpts
-      : [existingNodeOpts, tsxEsmFlag].filter(Boolean).join(' ')
-
+    //
+    // DO NOT set NODE_OPTIONS=--import tsx/esm here. It leaks into the pnpm
+    // process itself, and pnpm 11 + tsx ESM hooks conflict: tsx's resolver
+    // breaks pnpm's optional .pnpmfile.mjs probe and pnpm dies with
+    // PNPMFILE_FAIL. tsx hooks are injected ONLY into the tsdown process,
+    // inside the .bin/tsdown wrapper (see createTsdownWrapper).
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       [CLIENT_COMMIT_HASH_VAR]: process.env[CLIENT_COMMIT_HASH_VAR] ?? '',
       npm_execpath: pnpmBin,
       PATH: buildPath(join(this.dir, 'node_modules', '.bin')),
-      NODE_OPTIONS: nodeOptions,
     }
     if (node.useElectron) env.ELECTRON_RUN_AS_NODE = '1'
 
@@ -799,8 +792,17 @@ export class RuntimeSource {
    * any workspace manifests.
    *
    * The "tsx" loader uses tsx's ESM loader API (tsImport), which
-   * preserves import.meta.url. The build already loads tsx via
-   * --import tsx/esm, so this loader is always available.
+   * preserves import.meta.url.
+   *
+   * Beyond the root config, tsdown's workspace mode dynamic-imports each
+   * package's tsdown.config.ts in the SAME process. Those imports go
+   * through Node's native ESM translator, which throws SyntaxError on
+   * TypeScript syntax when native TS support is unavailable. The wrapper
+   * therefore also passes --import <tsx/esm absolute path> to the tsdown
+   * node process, registering tsx's hooks globally for that process only.
+   * It must NOT be done via NODE_OPTIONS in the environment: that would
+   * leak into pnpm itself, whose .pnpmfile.mjs probe breaks under tsx
+   * hooks (PNPMFILE_FAIL).
    *
    * The wrapper also sets NODE_PATH to the same three directories the
    * pnpm-generated shim uses, so tsdown's dependencies (rolldown, cac,
@@ -827,6 +829,20 @@ export class RuntimeSource {
       try { mkdirSync(wrapperDir, { recursive: true }) } catch { /* exists */ }
 
       const node = resolveNodeBin()
+      // Resolve tsx's ESM loader entry as an ABSOLUTE path so `--import`
+      // works regardless of the CWD pnpm runs the script from. The tsdown
+      // process needs these hooks globally: its tsImport only loads the
+      // root tsdown.config.ts; workspace package configs go through plain
+      // dynamic import() in the SAME process, and without hooks Node's
+      // native ESM translator throws SyntaxError on TypeScript syntax.
+      // We must NOT use NODE_OPTIONS for this — it would leak into pnpm
+      // itself (see buildAll).
+      let tsxEsm = ''
+      try {
+        tsxEsm = req.resolve('tsx/esm')
+      } catch {
+        log('launcher', 'createTsdownWrapper: tsx not resolvable, hooks disabled')
+      }
       // NODE_PATH must include tsdown's own node_modules so its
       // dependencies resolve from the pnpm virtual store. The three
       // segments mirror the pnpm cmd-shim that `pnpm install` generates.
@@ -837,13 +853,14 @@ export class RuntimeSource {
         join(this.dir, 'node_modules', '.pnpm', 'node_modules'),
       ]
       const nodePath = nodePathSegments.join(sep)
+      const importPart = tsxEsm ? ` --import "${tsxEsm}"` : ''
 
       if (process.platform === 'win32') {
         const wrapperPath = join(wrapperDir, 'tsdown.CMD')
         writeFileSync(
           wrapperPath,
           `@SETLOCAL\r\n@SET "NODE_PATH=${nodePath}"\r\n` +
-          `"${node.path}" "${runMjs}" --config-loader tsx %*\r\n`,
+          `"${node.path}"${importPart} "${runMjs}" --config-loader tsx %*\r\n`,
           'utf-8',
         )
       } else {
@@ -851,12 +868,15 @@ export class RuntimeSource {
         writeFileSync(
           wrapperPath,
           `#!/bin/sh\nexport NODE_PATH="${nodePath}"\n` +
-          `exec "${node.path}" "${runMjs}" --config-loader tsx "$@"\n`,
+          `exec "${node.path}"${importPart} "${runMjs}" --config-loader tsx "$@"\n`,
           'utf-8',
         )
         try { chmodSync(wrapperPath, 0o755) } catch { /* best-effort */ }
       }
-      log('launcher', `createTsdownWrapper: wrapper -> ${runMjs} --config-loader tsx`)
+      log(
+        'launcher',
+        `createTsdownWrapper: wrapper -> ${node.path}${importPart} ${runMjs} --config-loader tsx`,
+      )
       return wrapperDir
     } catch (err) {
       log('launcher', `createTsdownWrapper: failed: ${(err as Error).message.slice(0, 200)}`)
