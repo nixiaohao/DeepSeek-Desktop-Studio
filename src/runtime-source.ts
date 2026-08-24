@@ -619,18 +619,31 @@ export class RuntimeSource {
       throw new Error('未找到 pnpm，无法构建。请安装 pnpm 后重试，或检查安装包完整性。')
     }
 
-    // The workspace build script (scripts/build.ts) needs two environment
+    // The workspace build script (scripts/build.ts) needs environment
     // values that cannot be left to chance:
     // 1. DSH_CLIENT_COMMIT_HASH — ZIP-copied workspaces may have no Git HEAD,
     //    and the build crashes with "git rev-parse HEAD" if this is missing.
     // 2. npm_execpath — build.ts uses it as the package manager. We pass the
     //    same persistent pnpm copy that the wrapper uses, so every nested
     //    "pnpm" invocation resolves to a real file.
+    // 3. NODE_OPTIONS --import tsx/esm — the top-level build.ts gets
+    //    --import tsx/esm on the command line, but child processes spawned
+    //    via npm run (tsdown, tsc) only inherit NODE_OPTIONS, not CLI flags.
+    //    Without this, tsdown's tsImport loads the root config fine, but
+    //    workspace package configs loaded via dynamic import() hit Node's
+    //    native ESM translator and throw SyntaxError on TypeScript syntax.
+    const tsxEsmFlag = '--import tsx/esm'
+    const existingNodeOpts = (process.env.NODE_OPTIONS ?? '').trim()
+    const nodeOptions = existingNodeOpts.includes('tsx/esm')
+      ? existingNodeOpts
+      : [existingNodeOpts, tsxEsmFlag].filter(Boolean).join(' ')
+
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       [CLIENT_COMMIT_HASH_VAR]: process.env[CLIENT_COMMIT_HASH_VAR] ?? '',
       npm_execpath: pnpmBin,
       PATH: buildPath(join(this.dir, 'node_modules', '.bin')),
+      NODE_OPTIONS: nodeOptions,
     }
     if (node.useElectron) env.ELECTRON_RUN_AS_NODE = '1'
 
