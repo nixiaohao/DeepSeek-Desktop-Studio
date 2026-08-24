@@ -44,20 +44,44 @@ if (isWin) pnpmUnpack.push('node_modules/@pnpm/win-x64/**/*')
 if (isLinux) pnpmUnpack.push('node_modules/@pnpm/linux-x64/**/*', 'node_modules/@pnpm/linuxstatic-x64/**/*')
 if (isMac) pnpmUnpack.push('node_modules/@pnpm/macos-x64/**/*', 'node_modules/@pnpm/macos-arm64/**/*')
 
+function resolveRcedit(projectDir) {
+  // rcedit ships as an electron-builder dependency; resolve it robustly.
+  try {
+    return require.resolve('rcedit/bin/rcedit-x64.exe')
+  } catch {
+    return join(projectDir, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
+  }
+}
+
 /**
- * electron-builder skips rcedit when `signAndEditExecutable: false`, so the
- * exe ends up with the default Electron icon. This hook re-applies the app
- * icon after the unpacked exe is produced (before portable packaging).
+ * Win32 icon injection.
+ *
+ * IMPORTANT: This must run in `afterAllArtifactBuild`, NOT `afterPack`.
+ * With `signAndEditExecutable: false` electron-builder skips rcedit entirely,
+ * so the unpacked exe in `afterPack` keeps the default Electron icon AND the
+ * `portable` target re-assembles the final .exe from a fresh electron binary
+ * AFTER `afterPack` — discarding any icon we set there. Patching the FINAL
+ * artifact here is the only reliable place.
  */
+async function afterAllArtifactBuild(context) {
+  if (context.electronPlatformName !== 'win32') return context.artifactPaths
+  const projectDir = context.packager.projectDir
+  const iconPath = join(projectDir, 'assets', 'icon.ico')
+  const rceditExe = resolveRcedit(projectDir)
+  for (const artifact of context.artifactPaths) {
+    if (!artifact.toLowerCase().endsWith('.exe')) continue
+    try {
+      execFileSync(rceditExe, [artifact, '--set-icon', iconPath], { stdio: 'ignore' })
+      console.log(`[icon] set windows icon on ${artifact}`)
+    } catch (e) {
+      console.error(`[icon] FAILED to set windows icon on ${artifact}: ${e.message}`)
+    }
+  }
+  return context.artifactPaths
+}
+
 async function afterPack(context) {
   const { electronPlatformName, appOutDir } = context
-  if (electronPlatformName === 'win32') {
-    const rceditExe = join(context.packager.projectDir, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
-    const exePath = join(appOutDir, `${context.packager.appInfo.productName}.exe`)
-    const iconPath = join(context.packager.projectDir, 'assets', 'icon.ico')
-    execFileSync(rceditExe, [exePath, '--set-icon', iconPath])
-    return
-  }
   if (electronPlatformName === 'linux') {
     // Force --no-sandbox onto the REAL process argv by wrapping the Electron
     // ELF launcher with a shell script. Why this is necessary and reliable:
@@ -116,6 +140,7 @@ module.exports = {
   asarUnpack: pnpmUnpack,
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   afterPack,
+  afterAllArtifactBuild,
   win: {
     target: 'portable',
     icon: 'assets/icon.ico',

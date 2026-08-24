@@ -17,7 +17,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { join, dirname, isAbsolute, resolve as pathResolve } from 'node:path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import {
   detectGit,
@@ -224,6 +224,25 @@ export class RuntimeSource {
   }
 
   // ── git resolution ──
+
+  /**
+   * Remove stale git lock files that block all fetch operations.
+   * A crashed/interrupted `git fetch --depth 1` leaves `.git/shallow.lock`
+   * behind; every subsequent fetch then fails with
+   * "fatal: 无法创建 '.git/shallow.lock'：文件已存在" — the app silently
+   * falls back to the old (possibly inconsistent) clone and never recovers.
+   *
+   * Called before every fetch attempt (checkUpdate, gitify, rollback).
+   */
+  private removeStaleLocks(): void {
+    const lockFile = join(this.dir, '.git', 'shallow.lock')
+    try {
+      if (existsSync(lockFile)) {
+        rmSync(lockFile, { force: true })
+        log('launcher', `removeStaleLocks: removed stale ${lockFile}`)
+      }
+    } catch { /* best-effort */ }
+  }
 
   private getGit(): ToolInfo | null {
     if (!this.gitChecked) {
@@ -483,6 +502,7 @@ export class RuntimeSource {
         execFileSync(git.path, ['remote', 'add', 'origin', REPO_URL], { cwd: this.dir, windowsHide: true, stdio: 'ignore' })
       }
       const remote = this.remoteName()
+      this.removeStaleLocks()
       await this.runAsync(
         git.path,
         ['fetch', remote, BRANCH, '--depth', '1'],
@@ -528,6 +548,11 @@ export class RuntimeSource {
       'open',
       '@deepseek-ai/dsh-host-webserver',
       '@deepseek-ai/dsh-cli',
+      // tsdown declares `unrun` as an OPTIONAL peer dependency, which pnpm
+      // never auto-installs. The harness build (scripts/build.ts → tsdown)
+      // crashes with "Failed to import module 'unrun'" without it, so we must
+      // treat its absence as "needs install" too.
+      'unrun',
     ]
     for (const name of critical) {
       try {
@@ -994,6 +1019,7 @@ export class RuntimeSource {
     if (git) {
       const remote = this.remoteName()
       try {
+        this.removeStaleLocks()
         await this.runAsync(
           git.path,
           ['-C', this.dir, 'fetch', remote, BRANCH, '--depth', '1'],
@@ -1014,6 +1040,7 @@ export class RuntimeSource {
       }
     }
     try {
+      this.removeStaleLocks()
       const { git: iso, http, fs } = await this.gitIso()
       await iso.fetch({ fs, http, dir: this.dir, ref: BRANCH, singleBranch: true, depth: 1, tags: false })
       const head = await iso.resolveRef({ fs, dir: this.dir, ref: 'HEAD' })
@@ -1101,11 +1128,20 @@ export class RuntimeSource {
    */
   async installDeps(progress: ProgressFn, rollbackHead?: string): Promise<void> {
     progress('安装依赖（首次需要几分钟，请耐心等待）...')
+    // tsdown@0.22.x lists `unrun` as an OPTIONAL peer dependency. pnpm skips
+    // optional peers by default, and the harness package.json does not declare
+    // it, so the first-run build ("tsdown") fails with
+    // "Failed to import module 'unrun'". Inject it into the workspace
+    // package.json so the install below materializes it.
+    const injectedUnrun = this.ensureUnrunPeer()
     const storePopulated = existsSync(join(this.dir, 'node_modules', '.pnpm'))
     const force = storePopulated && this.needsInstall()
-    const args = force
+    let args = force
       ? ['install', '--force']
       : ['install', '--frozen-lockfile', '--prefer-offline']
+    // Injecting unrun desyncs the frozen lockfile, so relax to a normal install
+    // that records and resolves the new dependency.
+    if (injectedUnrun && !force) args = ['install', '--prefer-offline']
     try {
       await this.runPnpm(args, progress, '安装依赖')
       this.setLockHash(this.lockHash())
@@ -1116,12 +1152,43 @@ export class RuntimeSource {
           if (git) {
             progress('依赖安装失败，回滚到上一个版本...')
           const remote = this.remoteName()
+          this.removeStaleLocks()
           this.gitSync(['fetch', remote, rollbackHead, '--depth', '1'], { timeoutMs: 60_000 })
           this.gitSync(['reset', '--hard', 'FETCH_HEAD'], { timeoutMs: 60_000 })
           }
         } catch { /* rollback failed — leave code as-is */ }
       }
       throw new Error(`依赖安装失败：\n${(err as Error).message}`)
+    }
+  }
+
+  /**
+   * tsdown@0.22.x lists `unrun` as an OPTIONAL peer dependency. pnpm never
+   * auto-installs optional peers, and the harness package.json does not declare
+   * it, so the first-run build (scripts/build.ts → `tsdown`) fails with
+   * "Failed to import module 'unrun'". Inject `unrun` into the workspace
+   * package.json devDependencies so `pnpm install` materializes it.
+   *
+   * Returns true when we had to add it (the caller then relaxes the frozen
+   * lockfile). Idempotent: returns false when `unrun` is already declared.
+   */
+  private ensureUnrunPeer(): boolean {
+    const pkgPath = join(this.dir, 'package.json')
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+        dependencies?: Record<string, string>
+        devDependencies?: Record<string, string>
+        peerDependencies?: Record<string, string>
+      }
+      if (pkg.dependencies?.unrun || pkg.devDependencies?.unrun || pkg.peerDependencies?.unrun) {
+        return false
+      }
+      pkg.devDependencies = pkg.devDependencies ?? {}
+      pkg.devDependencies.unrun = '*'
+      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n')
+      return true
+    } catch {
+      return false
     }
   }
 
