@@ -17,7 +17,15 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { join, dirname, isAbsolute, resolve as pathResolve } from 'node:path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  chmodSync,
+  rmSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import {
   detectGit,
@@ -565,6 +573,22 @@ export class RuntimeSource {
   }
 
   /**
+   * Known locations of the built web client, newest layout first.
+   *
+   * Upstream has already moved the frontend output once
+   * (`packages/web/build/client` → `apps/web/dist`, where the package
+   * `@deepseek-ai/dsh-web-frontend` lives). Pinning a single path makes
+   * needsBuild() report "not built" forever after such a move, which forces a
+   * full backend + frontend rebuild on EVERY launch — minutes of waiting, and
+   * it multiplies the blast radius of any build failure, because the build
+   * gates startup. Probing every known location keeps the cache working.
+   */
+  private static readonly CLIENT_BUNDLE_CANDIDATES = [
+    ['apps', 'web', 'dist', 'index.html'],
+    ['packages', 'web', 'build', 'client', 'index.html'],
+  ] as const
+
+  /**
    * True when the frontend client bundle has not been built yet.
    *
    * Checks for the actual build artifact (index.html), not just the output
@@ -574,7 +598,10 @@ export class RuntimeSource {
    * skip the (multi-minute) frontend build entirely.
    */
   needsBuild(): boolean {
-    return !existsSync(join(this.dir, 'packages', 'web', 'build', 'client', 'index.html'))
+    for (const parts of RuntimeSource.CLIENT_BUNDLE_CANDIDATES) {
+      if (existsSync(join(this.dir, ...parts))) return false
+    }
+    return true
   }
 
   /**
@@ -1191,6 +1218,15 @@ export class RuntimeSource {
         return false
       }
       try {
+        // An update that built unsuccessfully was rolled back and recorded.
+        // Offering it again would re-run the same failing build on every
+        // launch, so skip it until upstream publishes a different commit.
+        const head = this.remoteHead()
+        const failed = this.readFailedCommit()
+        if (head && head === failed) {
+          log('launcher', `checkUpdate: skipping known-unbuildable commit ${head.slice(0, 7)}`)
+          return false
+        }
         const count = this.gitSync(['rev-list', '--count', `HEAD..${remote}/${BRANCH}`], { timeoutMs: 30_000 }).trim()
         return parseInt(count, 10) > 0
       } catch {
@@ -1239,10 +1275,113 @@ export class RuntimeSource {
     return { updated: true, skipped: false }
   }
 
+  // ── Orphaned build artifacts ──
+
+  /** Build output directories emitted by the harness build (gitignored). */
+  private static readonly ARTIFACT_DIRS = ['lib', 'dist'] as const
+
+  /** Directories that can hold a workspace package: packages/<group>/<pkg>. */
+  private packageSlots(): string[] {
+    const slots: string[] = []
+    const listDirs = (dir: string): string[] => {
+      try {
+        return readdirSync(dir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => join(dir, e.name))
+      } catch {
+        return []
+      }
+    }
+    for (const group of listDirs(join(this.dir, 'packages'))) {
+      slots.push(...listDirs(group))
+    }
+    slots.push(...listDirs(join(this.dir, 'apps')))
+    return slots
+  }
+
+  /**
+   * Delete build output left behind by packages that upstream deleted.
+   *
+   * `git reset --hard` only touches tracked files, so the compiled `lib/` and
+   * `dist/` directories of a removed package survive an update — they are
+   * gitignored. The next build then picks those stale `.js` files up as
+   * modules and fails the whole repository build with MISSING_EXPORT, because
+   * they import symbols the new source no longer exports. Since the build
+   * gates startup, the app becomes permanently unlaunchable: every attempt
+   * retries the same broken build.
+   *
+   * A slot counts as orphaned when it holds build output but has no
+   * package.json — i.e. the package itself is gone in the new revision. Only
+   * the artifact directories are removed; nothing else in the slot is touched.
+   *
+   * Returns the removed paths (workspace-relative) for logging and progress.
+   */
+  pruneOrphanedArtifacts(progress?: ProgressFn): string[] {
+    const pruned: string[] = []
+    for (const slot of this.packageSlots()) {
+      if (existsSync(join(slot, 'package.json'))) continue // live package
+      for (const artifact of RuntimeSource.ARTIFACT_DIRS) {
+        const target = join(slot, artifact)
+        if (!existsSync(target)) continue
+        try {
+          rmSync(target, { recursive: true, force: true })
+          pruned.push(target.slice(this.dir.length + 1))
+        } catch (err) {
+          log('launcher', `pruneOrphanedArtifacts: failed on ${target}: ${(err as Error).message.slice(0, 160)}`)
+        }
+      }
+    }
+    if (pruned.length > 0) {
+      log('launcher', `pruneOrphanedArtifacts: removed ${String(pruned.length)}: ${pruned.join(', ')}`)
+      progress?.(`已清理 ${String(pruned.length)} 个被上游删除包的残留产物`)
+    }
+    return pruned
+  }
+
+  // ── Known-bad update marker ──
+
+  /** Records a remote commit that could not be built, so we stop retrying it. */
+  private failedCommitFile(): string {
+    return join(this.dir, '.dsh', 'last-failed-commit.txt')
+  }
+
+  private readFailedCommit(): string {
+    try {
+      return readFileSync(this.failedCommitFile(), 'utf-8').trim()
+    } catch {
+      return ''
+    }
+  }
+
+  private writeFailedCommit(commit: string): void {
+    if (!commit) return
+    try {
+      mkdirSync(dirname(this.failedCommitFile()), { recursive: true })
+      writeFileSync(this.failedCommitFile(), commit, 'utf-8')
+      log('launcher', `writeFailedCommit: marking ${commit.slice(0, 7)} as unbuildable`)
+    } catch { /* best-effort */ }
+  }
+
+  private clearFailedCommit(): void {
+    try { rmSync(this.failedCommitFile(), { force: true }) } catch { /* best-effort */ }
+  }
+
+  /** Full hash currently pointed at by <remote>/<branch>, or '' when unknown. */
+  private remoteHead(): string {
+    const git = this.getGit()
+    if (!git) return ''
+    try {
+      return this.gitSync(['rev-parse', `${this.remoteName()}/${BRANCH}`], { timeoutMs: 15_000 }).trim()
+    } catch {
+      return ''
+    }
+  }
+
   /**
    * Reset working copy to origin/master, reinstall deps when the lockfile
    * changed, then rebuild. Rolls the code back to the previous commit when
-   * dependency install fails.
+   * dependency install fails — and, since the build gates startup, also when
+   * the build itself fails (see rollbackAfterBuildFailure).
    */
   async applyUpdate(progress: ProgressFn): Promise<void> {
     const oldHead = this.currentCommit()
@@ -1268,9 +1407,72 @@ export class RuntimeSource {
     if (this.lockHashChanged()) {
       await this.installDeps(progress, oldHead)
     }
+    // Packages upstream deleted leave gitignored build output behind; without
+    // this the new build consumes stale .js from them and fails (MISSING_EXPORT).
+    this.pruneOrphanedArtifacts(progress)
     // Code changed → rebuild backend + frontend so the web UI matches.
-    await this.buildAll(progress)
+    try {
+      await this.buildAll(progress)
+    } catch (err) {
+      await this.rollbackAfterBuildFailure(oldHead, progress, err as Error)
+      return
+    }
+    this.clearFailedCommit()
     // Plugin market re-install is deferred (non-critical, see ensureReady).
+  }
+
+  /**
+   * Recovery for a build that failed right after an update.
+   *
+   * The build gates startup, so leaving the new-but-unbuildable commit in the
+   * working tree makes the app unlaunchable: every launch would repeat the
+   * same failure. Two things happen here:
+   *
+   *   1. The offending remote commit is recorded, so checkUpdate() stops
+   *      offering it until upstream publishes something new.
+   *   2. The working copy is reset to the commit that ran successfully before
+   *      the update and rebuilt, so the app starts on a known-good version.
+   *
+   * Rebuilding the old code usually works without reinstalling (dependencies
+   * are a superset), so we try that first and only reinstall when the plain
+   * rebuild fails — a reinstall costs minutes.
+   *
+   * Throws when the rollback itself cannot be built; that is a real failure
+   * the user must see.
+   */
+  private async rollbackAfterBuildFailure(
+    oldHead: string,
+    progress: ProgressFn,
+    buildError: Error
+  ): Promise<void> {
+    const bad = this.remoteHead()
+    this.writeFailedCommit(bad)
+
+    const git = this.getGit()
+    if (git && oldHead && oldHead !== 'unknown') {
+      progress('新版本构建失败，正在回退到上一个可用版本...')
+      try {
+        this.removeStaleLocks()
+        this.gitSync(['reset', '--hard', oldHead], { timeoutMs: 60_000 })
+      } catch (err) {
+        log('launcher', `rollbackAfterBuildFailure: reset failed: ${(err as Error).message.slice(0, 200)}`)
+      }
+    }
+    // The old revision can have orphans of its own (packages it removed).
+    this.pruneOrphanedArtifacts(progress)
+
+    try {
+      await this.buildAll(progress)
+    } catch {
+      progress('回退后构建仍失败，正在按旧版本重新安装依赖...')
+      await this.installDeps(progress)
+      this.pruneOrphanedArtifacts(progress)
+      await this.buildAll(progress)
+    }
+
+    progress('已回退到上一个可用版本（本次更新已跳过）')
+    log('launcher', `rollbackAfterBuildFailure: recovered on ${oldHead}, skipped ${bad.slice(0, 7)}`)
+    void buildError // surfaced by the caller's progress/log trail
   }
 
   // ── Dependencies ──
