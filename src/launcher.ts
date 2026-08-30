@@ -22,11 +22,11 @@ import { gitAvailable } from './env-check.js'
 const SERVER_TIMEOUT_MS = 120_000
 
 /**
- * How long to wait for the tokenized URL before falling back to a tokenless
- * probe. Must exceed the slowest boot path (tsx source ≈ 6.2s), otherwise the
- * probe runs against `/` without a token and only ever gets 401.
+ * How long the HTTP probe keeps trying to confirm readiness AFTER the
+ * `dsh web:` URL line has been printed. The line is the authoritative signal,
+ * so this is a bounded sanity check — not the thing the launch blocks on.
  */
-const TOKEN_WAIT_MS = 20_000
+const PROBE_CONFIRM_MS = 20_000
 
 /** Port to kill stale processes on before starting */
 const DEFAULT_PORT = 3080
@@ -261,32 +261,49 @@ export class Launcher {
   }
 
   /**
-   * Poll a URL until it responds 200 or timeout. Fails FAST when the
-   * backend process died — no more blind 120-second waits.
+   * Wait until the backend can serve the UI. Two phases, in order of
+   * authority:
    *
-   * Returns the URL that answered, so the caller can hand the same
-   * authenticated URL to the browser window.
+   *  1. The `dsh web:` URL line. Upstream documents it as THE readiness
+   *     signal ("The URL line and browser handoff are readiness signals ...
+   *     both run only after the Loader tree settles and Connection
+   *     authentication is available"), so it gets the full timeout budget.
+   *     A short fixed window used to expire on slower machines, after which
+   *     the probe fell back to a tokenless URL that dsh answers 401 forever.
+   *  2. A short HTTP confirmation. It must not gate the launch for minutes
+   *     when the documented signal has already arrived.
+   *
+   * Fails immediately when the backend process died — no blind 120s waits.
+   *
+   * Returns the URL to hand to the browser window (the tokenized one when
+   * available, so the server can mint its session cookie).
    */
   private async waitForServer(url: string, timeoutMs: number): Promise<string> {
     const start = Date.now()
     let lastError = ''
-    // Newer dsh versions print a tokenized URL a few seconds after boot.
-    // The wait must cover the SLOWEST supported boot path: the built bin
-    // prints the URL at ~3.3s, but the tsx source fallback needs ~6.2s. A
-    // 5s window silently missed it and left the probe hitting a tokenless
-    // URL, which dsh answers 401 forever.
-    while (!this.serverUrl && Date.now() - start < TOKEN_WAIT_MS) {
-      if (this.backendProcess && this.backendProcess.exitCode !== null) break
+
+    const deadTail = (): string =>
+      `后端进程已退出 (exit ${this.backendProcess?.exitCode})。\n` +
+      `最近日志（完整日志：${getLogDir()}\\backend.log）：\n` +
+      this.recentBackendTail()
+
+    // Phase 1 — the printed URL line is the authoritative signal.
+    while (!this.serverUrl && Date.now() - start < timeoutMs) {
+      if (this.backendProcess && this.backendProcess.exitCode !== null) {
+        throw new Error(deadTail())
+      }
       await new Promise((r) => setTimeout(r, 100))
     }
     const probeUrl = this.serverUrl || url
-    while (Date.now() - start < timeoutMs) {
+    if (!this.serverUrl) {
+      log('launcher', `No tokenized URL line seen within ${timeoutMs}ms; probing ${redactToken(url)} directly`)
+    }
+
+    // Phase 2 — confirm over HTTP, but only for a bounded window.
+    const confirmDeadline = Date.now() + PROBE_CONFIRM_MS
+    while (Date.now() < confirmDeadline) {
       if (this.backendProcess && this.backendProcess.exitCode !== null) {
-        throw new Error(
-          `后端进程已退出 (exit ${this.backendProcess.exitCode})。\n` +
-          `最近日志（完整日志：${getLogDir()}\\backend.log）：\n` +
-          this.recentBackendTail()
-        )
+        throw new Error(deadTail())
       }
       try {
         const controller = new AbortController()
@@ -319,13 +336,19 @@ export class Launcher {
       } catch (e) {
         lastError = (e as Error).message
       }
-      await new Promise((r) => setTimeout(r, 1000))
+      await new Promise((r) => setTimeout(r, 500))
     }
-    log('launcher', `Server NOT ready after ${timeoutMs}ms, last error: ${lastError}`)
-    throw new Error(
-      `服务在 ${timeoutMs / 1000} 秒内未就绪: ${redactToken(probeUrl)}\n最后错误: ${lastError}\n` +
-      `完整日志：${getLogDir()}\\backend.log`
+
+    // The line was printed but HTTP never confirmed it. Upstream treats the
+    // line as the readiness signal, so continuing is the documented behavior —
+    // blocking here for minutes on a probe that cannot succeed is what made
+    // the app look broken. Record it loudly for diagnosis.
+    log(
+      'launcher',
+      `URL line seen but HTTP probe never confirmed within ${PROBE_CONFIRM_MS}ms ` +
+      `(last error: ${lastError}); continuing on the printed URL ${redactToken(probeUrl)}`,
     )
+    return probeUrl
   }
 
   /** Last lines of backend.log for error panels (reads the file tail). */

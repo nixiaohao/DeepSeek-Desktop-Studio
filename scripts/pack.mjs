@@ -7,12 +7,11 @@
  *
  * Usage:  pnpm pack:auto   (or: node scripts/pack.mjs)
  */
-import { execSync, execFileSync } from 'node:child_process'
-import { existsSync, globSync, rmSync } from 'node:fs'
+import { execSync } from 'node:child_process'
+import { existsSync, globSync, rmSync, statSync } from 'node:fs'
 import { platform } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
 
 const shellRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -84,32 +83,31 @@ try {
   builderError = e
 }
 
-// On Windows, re-apply the icon to every produced .exe. electron-builder's
-// own rcedit pass (afterAllArtifactBuild) is skipped whenever the build
-// aborts during cleanup — precisely the case above.
+// Verify what actually came out.
+//
+// DO NOT re-run rcedit here. electron-builder already patches the artifact in
+// `afterAllArtifactBuild`, and a second rcedit pass on the finished portable
+// exe TRUNCATES it: a healthy ~95MB build comes back as a 134KB stub that
+// still exits 0, so the corruption is invisible unless the size is checked.
+// (That stub is what shipped as "the icon is still the default" — the file
+// was never the real application.)
+//
+// A packaging run is only a success when the artifact is plausibly sized.
+const MIN_ARTIFACT_BYTES = 50 * 1024 * 1024
 let produced = []
 if (os === 'win32') {
-  const require = createRequire(import.meta.url)
-  let rceditExe
-  try {
-    rceditExe = require.resolve('rcedit/bin/rcedit-x64.exe')
-  } catch {
-    // rcedit's package exports do not expose the binary; use the on-disk path.
-    rceditExe = join(shellRoot, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
-  }
   produced = globSync('*.exe', { cwd: distDir })
-  if (!existsSync(rceditExe)) {
-    console.error('[pack] rcedit not found; skipping Windows icon fix')
-  } else {
-    for (const exe of produced) {
-      const exePath = join(distDir, exe)
-      try {
-        execFileSync(rceditExe, [exePath, '--set-icon', join(shellRoot, 'assets', 'icon.ico')], { stdio: 'inherit' })
-        console.log(`[pack] icon applied: ${exePath}`)
-      } catch (e) {
-        console.error(`[pack] failed to set icon on ${exePath}: ${e.message}`)
-      }
+  for (const exe of produced) {
+    const exePath = join(distDir, exe)
+    const { size } = statSync(exePath)
+    if (size < MIN_ARTIFACT_BYTES) {
+      console.error(
+        `[pack] FAILED: ${exe} is ${size} bytes (< ${MIN_ARTIFACT_BYTES}). ` +
+        `The artifact is truncated or incomplete — do not ship it.`,
+      )
+      process.exit(1)
     }
+    console.log(`[pack] artifact OK: ${exe} (${(size / 1024 / 1024).toFixed(2)} MB)`)
   }
 }
 

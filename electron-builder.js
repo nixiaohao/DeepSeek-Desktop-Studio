@@ -1,6 +1,6 @@
 const { join } = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { chmodSync, existsSync, renameSync, writeFileSync } = require('node:fs')
+const { chmodSync, existsSync, readdirSync, renameSync, writeFileSync } = require('node:fs')
 
 /**
  * @pnpm/exe pulls a standalone SEA binary for every platform through
@@ -43,6 +43,34 @@ const pnpmUnpack = ['node_modules/@pnpm/exe/**/*']
 if (isWin) pnpmUnpack.push('node_modules/@pnpm/win-x64/**/*')
 if (isLinux) pnpmUnpack.push('node_modules/@pnpm/linux-x64/**/*', 'node_modules/@pnpm/linuxstatic-x64/**/*')
 if (isMac) pnpmUnpack.push('node_modules/@pnpm/macos-x64/**/*', 'node_modules/@pnpm/macos-arm64/**/*')
+
+/**
+ * Path of the application executable inside `appOutDir`.
+ *
+ * `context.packager.executableName` is UNDEFINED during `afterPack` on
+ * Windows (electron-builder only computes it later, when it builds the
+ * installer), so it cannot be relied on here — using it produced
+ * `...\win-unpacked\undefined.exe` and silently skipped the icon patch.
+ * `appInfo.productFilename` is populated at this stage, and a directory scan
+ * is the last resort (the app dir holds exactly one .exe on Windows).
+ */
+function appExePath(appOutDir, packager) {
+  const preferred = packager.executableName || packager.appInfo?.productFilename
+  if (preferred) {
+    const direct = join(appOutDir, `${preferred}${process.platform === 'win32' ? '.exe' : ''}`)
+    if (existsSync(direct)) return direct
+  }
+  // Windows only: the app directory holds exactly one .exe, so scanning is
+  // unambiguous. On other platforms a blind scan could pick a directory, so
+  // callers report a miss instead of guessing.
+  if (process.platform !== 'win32') return null
+  try {
+    const match = readdirSync(appOutDir).find((f) => f.toLowerCase().endsWith('.exe'))
+    return match ? join(appOutDir, match) : null
+  } catch {
+    return null
+  }
+}
 
 function resolveRcedit(projectDir) {
   // rcedit ships as an electron-builder dependency; resolve it robustly.
@@ -97,8 +125,8 @@ async function afterPack(context) {
     // default icon, because `portable` executes this file out of a temp dir.
     const iconPath = join(context.packager.projectDir, 'assets', 'icon.ico')
     const rceditExe = resolveRcedit(context.packager.projectDir)
-    const exePath = join(appOutDir, `${context.packager.executableName}.exe`)
-    if (existsSync(exePath)) {
+    const exePath = appExePath(appOutDir, context.packager)
+    if (exePath && existsSync(exePath)) {
       try {
         execFileSync(rceditExe, [exePath, '--set-icon', iconPath], { stdio: 'ignore' })
         console.log(`[icon] set app icon on ${exePath}`)
@@ -132,18 +160,23 @@ async function afterPack(context) {
     // take effect and the AppImage launches with a double-click / plain
     // `./AppImage` on every distro, with no manual flags and no system deps
     // beyond the usual Electron shared libraries.
-    const exe = context.packager.executableName
-    const exePath = join(appOutDir, exe)
-    const realPath = join(appOutDir, `${exe}.bin`)
-    if (existsSync(exePath)) {
-      renameSync(exePath, realPath)
-      const wrapper =
-        '#!/bin/sh\n' +
-        'HERE="$(dirname "$(readlink -f "${0}")")"\n' +
-        'exec "${HERE}/' + exe + '.bin" --no-sandbox --disable-setuid-sandbox "$@"\n'
-      writeFileSync(exePath, wrapper)
-      chmodSync(exePath, 0o755)
+    const exePath = appExePath(appOutDir, context.packager)
+    if (!exePath || !existsSync(exePath)) {
+      // Never swallow this: a missing wrapper means the AppImage aborts on
+      // distros with unprivileged user namespaces disabled.
+      console.error(`[linux] app executable not found in ${appOutDir} — no-sandbox wrapper NOT applied`)
+      return
     }
+    const exe = exePath.slice(appOutDir.length + 1)
+    const realPath = join(appOutDir, `${exe}.bin`)
+    renameSync(exePath, realPath)
+    const wrapper =
+      '#!/bin/sh\n' +
+      'HERE="$(dirname "$(readlink -f "${0}")")"\n' +
+      'exec "${HERE}/' + exe + '.bin" --no-sandbox --disable-setuid-sandbox "$@"\n'
+    writeFileSync(exePath, wrapper)
+    chmodSync(exePath, 0o755)
+    console.log(`[linux] no-sandbox wrapper applied to ${exe}`)
   }
 }
 
