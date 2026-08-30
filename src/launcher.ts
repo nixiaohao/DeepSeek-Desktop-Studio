@@ -170,19 +170,25 @@ export class Launcher {
       // The readiness URL carries a live credential; keep it out of backend.log.
       appendChildOutput('backend', `[OUT] ${redactTokenInText(chunk)}`)
       // Newer harness versions emit `dsh web: http://host:port/?token=...`.
-      // Wait checks the plain port first, but if a token URL appears we must
-      // use it: requests to the bare root will return 401 Unauthorized.
+      // stdout arrives in arbitrary chunks: a naive regex on the buffer can
+      // match a truncated token (e.g. the first chunk ends mid-token), which
+      // then fails authentication and returns 401. Only search complete lines
+      // and keep the still-incomplete tail in the buffer for the next chunk.
       outBuf += chunk
       if (!this.serverUrl) {
-        const m = /dsh web:\s+(http:\/\/[^\s\r\n]+)/.exec(outBuf)
-        if (m) {
-          this.serverUrl = m[1].trim()
-          // Log the origin only: the token grants access to the local web UI
-          // and must never reach disk.
-          log('launcher', `Captured dsh web URL: ${redactToken(this.serverUrl)}`)
+        const lines = outBuf.split(/\r?\n/)
+        for (let i = 0; i < lines.length - 1; i++) {
+          const m = /dsh web:\s+(http:\/\/[^\s\r\n]+)/.exec(lines[i])
+          if (m) {
+            this.serverUrl = m[1].trim()
+            // Log the origin only: the token grants access to the local web UI
+            // and must never reach disk.
+            log('launcher', `Captured dsh web URL: ${redactToken(this.serverUrl)}`)
+            break
+          }
         }
       }
-      if (outBuf.length > 4096) outBuf = outBuf.slice(-4096)
+      if (outBuf.length > 8192) outBuf = outBuf.slice(-8192)
     })
     proc.stderr?.on('data', (data: Buffer) => appendChildOutput('backend', `[ERR] ${data.toString()}`))
     proc.on('exit', (code) => log('launcher', `Backend process exited with code ${code}`))
