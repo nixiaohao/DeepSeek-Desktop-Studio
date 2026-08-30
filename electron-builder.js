@@ -54,14 +54,22 @@ function resolveRcedit(projectDir) {
 }
 
 /**
- * Win32 icon injection.
+ * Win32 icon injection — TWO passes are required, they patch different files.
  *
- * IMPORTANT: This must run in `afterAllArtifactBuild`, NOT `afterPack`.
- * With `signAndEditExecutable: false` electron-builder skips rcedit entirely,
- * so the unpacked exe in `afterPack` keeps the default Electron icon AND the
- * `portable` target re-assembles the final .exe from a fresh electron binary
- * AFTER `afterPack` — discarding any icon we set there. Patching the FINAL
- * artifact here is the only reliable place.
+ * `portable` is a self-extracting (NSIS) launcher: running the outer .exe
+ * unpacks `win-unpacked/` into a temp directory and then executes the INNER
+ * `DeepSeek Studio.exe` from there. Consequences:
+ *
+ *  1. The TASKBAR icon belongs to the running process, i.e. the INNER exe.
+ *     Patching only the outer launcher leaves the taskbar on Electron's
+ *     default icon even though Explorer shows the right one — exactly the bug
+ *     this fixes. See afterPack().
+ *  2. The outer .exe still needs the icon for Explorer / file properties /
+ *     the "open with" list. See afterAllArtifactBuild() below.
+ *
+ * Both are needed because `signAndEditExecutable: false` (required on
+ * locked-down Windows that cannot extract winCodeSign's dylib symlinks)
+ * disables electron-builder's own rcedit pass entirely.
  */
 async function afterAllArtifactBuild(context) {
   if (context.electronPlatformName !== 'win32') return context.artifactPaths
@@ -82,6 +90,27 @@ async function afterAllArtifactBuild(context) {
 
 async function afterPack(context) {
   const { electronPlatformName, appOutDir } = context
+
+  if (electronPlatformName === 'win32') {
+    // Patch the exe that actually RUNS (see the comment above
+    // afterAllArtifactBuild). Without this the taskbar keeps Electron's
+    // default icon, because `portable` executes this file out of a temp dir.
+    const iconPath = join(context.packager.projectDir, 'assets', 'icon.ico')
+    const rceditExe = resolveRcedit(context.packager.projectDir)
+    const exePath = join(appOutDir, `${context.packager.executableName}.exe`)
+    if (existsSync(exePath)) {
+      try {
+        execFileSync(rceditExe, [exePath, '--set-icon', iconPath], { stdio: 'ignore' })
+        console.log(`[icon] set app icon on ${exePath}`)
+      } catch (e) {
+        console.error(`[icon] FAILED to set app icon on ${exePath}: ${e.message}`)
+      }
+    } else {
+      console.error(`[icon] app exe not found at ${exePath}`)
+    }
+    return
+  }
+
   if (electronPlatformName === 'linux') {
     // Force --no-sandbox onto the REAL process argv by wrapping the Electron
     // ELF launcher with a shell script. Why this is necessary and reliable:

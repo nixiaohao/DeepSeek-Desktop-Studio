@@ -15,6 +15,7 @@ import { loadPreferences, savePreferences } from './preferences.js'
 import { createTray, destroyTray } from './tray.js'
 import { setupMenu } from './menu.js'
 import { resolveWorkspace } from './workspace.js'
+import { loadPackagedIcon } from './icons.js'
 import { runWizard } from './wizard.js'
 import { log, getLogDir, isDebug } from './logging.js'
 import { relaunchApp } from './relaunch.js'
@@ -26,6 +27,18 @@ import { relaunchApp } from './relaunch.js'
 //    本应用本质是执行任意 agent 代码的外壳，关闭沙箱不引入额外风险面，换取此类环境兼容性。
 app.disableHardwareAcceleration()
 app.commandLine.appendSwitch('no-sandbox')
+
+// Windows needs a STABLE App User Model ID for the taskbar.
+//
+// The `portable` target unpacks the app into a NEW randomly named temp
+// directory on every run. Without an explicit ID, Windows derives the taskbar
+// identity from the executable path, so every launch looks like a different
+// application: the button can fall back to a generic icon, windows stop
+// grouping, and pinning does not survive. A fixed ID ties all runs to one
+// taskbar entry. Must be set before any window is created.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.dsh.studio')
+}
 
 // 在禁用非特权 user namespace 的发行版（Ubuntu 24.04+/Resolute）上，Chromium
 // 会回退到 SUID sandbox 并因 chrome-sandbox 权限不正确而 FATAL。显式关闭
@@ -100,8 +113,9 @@ function createMainWindow(url: string): BrowserWindow {
     minWidth: 1024,
     minHeight: 680,
     title: 'DeepSeek Studio',
-    // Windows uses the multi-resolution .ico; Linux/macOS need .png.
-    icon: join(app.getAppPath(), 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+    // Loaded through a buffer, not a path: a path inside app.asar silently
+    // decodes to an empty image in native code (see src/icons.ts).
+    icon: loadPackagedIcon(),
     show: false,
     backgroundColor: '#0f1117',
     webPreferences: {

@@ -63,6 +63,15 @@ const INSTALL_TIMEOUT_MS = 30 * 60_000
 const BUILD_TIMEOUT_MS = 30 * 60_000
 const MARKET_TIMEOUT_MS = 10 * 60_000
 
+/**
+ * Minimum gap between two automatic remote update checks.
+ *
+ * A `git fetch` costs ~4.5s of blocking time on every launch, and upstream
+ * publishes a handful of commits per day, so checking every launch is pure
+ * startup latency. Menu → 检查更新 always bypasses this.
+ */
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+
 export type ProgressFn = (msg: string) => void
 
 export interface UpdateResult {
@@ -536,12 +545,53 @@ export class RuntimeSource {
   }
 
   /**
+   * Third-party dependencies that must exist in the pnpm store.
+   *
+   * `unrun` is an OPTIONAL peer of tsdown, so pnpm never auto-installs it;
+   * the harness build (`scripts/build.ts` → tsdown) crashes with "Failed to
+   * import module 'unrun'" without it. It stays critical for that reason.
+   */
+  private static readonly CRITICAL_DEPS = ['koffi', 'open', 'unrun'] as const
+
+  /**
+   * Workspace packages the shell boots from, as path segments under the repo
+   * root. pnpm links these into their CONSUMERS' node_modules, never into the
+   * root node_modules, so they have to be checked as source directories.
+   */
+  private static readonly CRITICAL_WORKSPACE_PKGS = [
+    ['apps', 'cli'],
+    ['packages', 'host', 'webserver'],
+  ] as const
+
+  /**
+   * Whether a third-party dependency is present in the pnpm store.
+   *
+   * pnpm's default layout is STRICT: `node_modules/<pkg>` only holds what the
+   * ROOT package.json declares; everything else lands in
+   * `node_modules/.pnpm/<slug>@<version>/node_modules/<pkg>` (scoped names
+   * become `@scope+name`). Resolving these names from the repo root therefore
+   * fails even on a perfectly installed workspace.
+   *
+   * That false negative made needsInstall() report "needs install" on every
+   * launch, re-running a dependency install AND a full build (≈21s) before
+   * every start.
+   */
+  private hasStoredDep(name: string): boolean {
+    const store = join(this.dir, 'node_modules', '.pnpm')
+    const slug = `${name.replace('/', '+')}@`
+    try {
+      return readdirSync(store).some((entry) => entry.startsWith(slug))
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * True when node_modules is missing or incomplete.
    *
-   * The naive check (".pnpm exists") is not enough: safe-delete guards or
-   * interrupted installs may leave the content-addressable store populated
-   * while the top-level symlinks / workspace links are missing. We verify
-   * that a few critical runtime dependencies can actually be resolved.
+   * Each kind of package is checked where it actually lives — the
+   * content-addressable store for third-party deps, source directories for
+   * workspace packages — instead of resolving every name from the repo root.
    */
   needsInstall(): boolean {
     if (
@@ -550,24 +600,11 @@ export class RuntimeSource {
     ) {
       return true
     }
-    const req = createRequire(join(this.dir, 'package.json'))
-    const critical = [
-      'koffi',
-      'open',
-      '@deepseek-ai/dsh-host-webserver',
-      '@deepseek-ai/dsh-cli',
-      // tsdown declares `unrun` as an OPTIONAL peer dependency, which pnpm
-      // never auto-installs. The harness build (scripts/build.ts → tsdown)
-      // crashes with "Failed to import module 'unrun'" without it, so we must
-      // treat its absence as "needs install" too.
-      'unrun',
-    ]
-    for (const name of critical) {
-      try {
-        req.resolve(name)
-      } catch {
-        return true
-      }
+    for (const name of RuntimeSource.CRITICAL_DEPS) {
+      if (!this.hasStoredDep(name)) return true
+    }
+    for (const parts of RuntimeSource.CRITICAL_WORKSPACE_PKGS) {
+      if (!existsSync(join(this.dir, ...parts, 'package.json'))) return true
     }
     return false
   }
@@ -1213,6 +1250,9 @@ export class RuntimeSource {
         // Fetch may have just created refs/remotes/<remote>/<branch>. Reattach
         // the (possibly empty) local branch to it so HEAD is resolvable.
         this.attachToRemoteBranch()
+        // Only a completed fetch counts as "checked": an offline launch must
+        // not suppress every check for the next interval.
+        this.touchUpdateCheck()
       } catch {
         progress('无法连接 GitHub（已使用本地版本启动）')
         return false
@@ -1237,6 +1277,7 @@ export class RuntimeSource {
       this.removeStaleLocks()
       const { git: iso, http, fs } = await this.gitIso()
       await iso.fetch({ fs, http, dir: this.dir, ref: BRANCH, singleBranch: true, depth: 1, tags: false })
+      this.touchUpdateCheck()
       const head = await iso.resolveRef({ fs, dir: this.dir, ref: 'HEAD' })
       const remote = await iso.resolveRef({ fs, dir: this.dir, ref: `refs/remotes/origin/${BRANCH}` })
       return head !== remote
@@ -1249,8 +1290,10 @@ export class RuntimeSource {
   /**
    * Startup update path. git availability is checked FIRST — if missing,
    * the update is skipped and the app starts with existing code.
+   *
+   * @param force - bypass the update-check throttle (user-triggered check).
    */
-  async ensureUpdated(progress: ProgressFn): Promise<UpdateResult> {
+  async ensureUpdated(progress: ProgressFn, opts: { force?: boolean } = {}): Promise<UpdateResult> {
     if (!this.exists) {
       // No git working copy (e.g. ZIP dir that failed git-ification) —
       // run gitify once, and if that fails, just start.
@@ -1267,7 +1310,12 @@ export class RuntimeSource {
       progress('未检测到 git，已跳过自动更新（使用现有代码启动）')
       return { updated: false, skipped: true, reason: 'no-git' }
     }
-    if (!(await this.checkUpdate(progress))) {
+    if (!this.shouldCheckUpdate(opts.force ?? false)) {
+      log('launcher', 'update check throttled — starting with the local version')
+      return { updated: false, skipped: true, reason: 'throttled' }
+    }
+    const hasUpdate = await this.checkUpdate(progress)
+    if (!hasUpdate) {
       return { updated: false, skipped: false }
     }
     progress('发现新版本，正在更新...')
@@ -1364,6 +1412,38 @@ export class RuntimeSource {
 
   private clearFailedCommit(): void {
     try { rmSync(this.failedCommitFile(), { force: true }) } catch { /* best-effort */ }
+  }
+
+  // ── Update-check throttle ──
+
+  /** Timestamp of the last successful remote fetch (epoch ms). */
+  private updateCheckFile(): string {
+    return join(this.dir, '.dsh', 'last-update-check')
+  }
+
+  /**
+   * Whether a remote fetch is due.
+   *
+   * `git fetch` blocked every single startup for ~4.5s before the backend was
+   * even spawned. Upstream publishes a few times a day at most, so checking
+   * more than once every few hours buys nothing and costs every user every
+   * launch. The menu's "检查更新" passes force=true and always fetches.
+   */
+  private shouldCheckUpdate(force: boolean): boolean {
+    if (force) return true
+    try {
+      const at = Number.parseInt(readFileSync(this.updateCheckFile(), 'utf-8').trim(), 10)
+      if (Number.isFinite(at) && Date.now() - at < UPDATE_CHECK_INTERVAL_MS) return false
+    } catch { /* no marker → check now */ }
+    return true
+  }
+
+  /** Record that a remote fetch completed, so the next launches skip it. */
+  private touchUpdateCheck(): void {
+    try {
+      mkdirSync(dirname(this.updateCheckFile()), { recursive: true })
+      writeFileSync(this.updateCheckFile(), String(Date.now()), 'utf-8')
+    } catch { /* best-effort */ }
   }
 
   /** Full hash currently pointed at by <remote>/<branch>, or '' when unknown. */

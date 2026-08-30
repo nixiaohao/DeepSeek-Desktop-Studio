@@ -9,7 +9,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { resolve } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { app } from 'electron'
 import { RuntimeSource, type ProgressFn } from './runtime-source.js'
 import { killPort, resolveNodeBin, buildPath, killProcessTree } from './env-detector.js'
@@ -20,6 +20,13 @@ import { gitAvailable } from './env-check.js'
 
 /** Server ready poll timeout — increased for slow cold starts */
 const SERVER_TIMEOUT_MS = 120_000
+
+/**
+ * How long to wait for the tokenized URL before falling back to a tokenless
+ * probe. Must exceed the slowest boot path (tsx source ≈ 6.2s), otherwise the
+ * probe runs against `/` without a token and only ever gets 401.
+ */
+const TOKEN_WAIT_MS = 20_000
 
 /** Port to kill stale processes on before starting */
 const DEFAULT_PORT = 3080
@@ -136,11 +143,54 @@ export class Launcher {
    * Runs the source via tsx with Node's --import hook (same as `pnpm dsh web`),
    * using a system node when available, or Electron's embedded Node otherwise.
    */
-  private spawnDshWeb(port: number): ChildProcess {
-    const cliEntry = resolve(this.sourceDir, 'apps', 'cli', 'src', 'bin.ts')
-    const { path: nodeBin, useElectron } = resolveNodeBin()
+  /**
+   * Choose how the harness CLI is booted.
+   *
+   * Upstream ships two entries (see `apps/cli/package.json`):
+   *   - `bin.dsh` -> `lib/bin.js`                    ← built output, the supported entry
+   *   - root script `dsh` -> `node --import tsx/esm apps/cli/src/bin.ts` ← dev entry
+   *
+   * We used to always take the dev entry, which makes tsx transpile the whole
+   * TypeScript graph on every single launch: measured 6.2s to the first
+   * request versus 3.3s for the built bin, plus a runtime dependency on tsx.
+   * Prefer the built bin; fall back to source when it is missing or stale.
+   */
+  private resolveCliArgs(): string[] {
+    const built = resolve(this.sourceDir, 'apps', 'cli', 'lib', 'bin.js')
+    const source = resolve(this.sourceDir, 'apps', 'cli', 'src', 'bin.ts')
+    const profile = ['--profile', 'web']
+    // Electron window already loads the URL; suppress the harness's own
+    // browser-open behavior.
+    const noOpen = ['--no-open']
+    if (this.builtCliIsUsable(built, source)) return [built, ...profile, ...noOpen]
+    return ['--import', 'tsx/esm', source, ...profile, ...noOpen]
+  }
 
-    log('launcher', `Spawning dsh web: ${nodeBin} --import tsx/esm ${cliEntry} --profile web (electronNode=${useElectron})`)
+  /**
+   * Whether the built CLI entry can be trusted.
+   *
+   * `apps/cli/lib` is gitignored, so `git reset --hard` to a newer commit
+   * leaves the PREVIOUS build in place — booting it would silently run stale
+   * code. Git sets the mtime of every checked-out file, so a source file newer
+   * than the built entry means "rebuilt not yet done": fall back to source
+   * (which tsx compiles from the current tree) for that one launch. The next
+   * launch picks the rebuilt bin up.
+   */
+  private builtCliIsUsable(built: string, source: string): boolean {
+    if (!existsSync(built)) return false
+    try {
+      if (!existsSync(source)) return true
+      return statSync(built).mtimeMs >= statSync(source).mtimeMs
+    } catch {
+      return false
+    }
+  }
+
+  private spawnDshWeb(port: number): ChildProcess {
+    const { path: nodeBin, useElectron } = resolveNodeBin()
+    const args = this.resolveCliArgs()
+
+    log('launcher', `Spawning dsh web: ${nodeBin} ${args.join(' ')} (electronNode=${useElectron})`)
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -149,13 +199,7 @@ export class Launcher {
     }
     if (useElectron) env.ELECTRON_RUN_AS_NODE = '1'
 
-    const proc = spawn(nodeBin, [
-      '--import', 'tsx/esm',
-      cliEntry,
-      '--profile', 'web',
-      '--no-open',  // Electron window already loads the URL; suppress the
-                    // harness's own browser-open behavior.
-    ], {
+    const proc = spawn(nodeBin, args, {
       cwd: this.sourceDir,
       shell: false,
       env,
@@ -227,8 +271,11 @@ export class Launcher {
     const start = Date.now()
     let lastError = ''
     // Newer dsh versions print a tokenized URL a few seconds after boot.
-    // Wait briefly for that token before falling back to the bare URL.
-    while (!this.serverUrl && Date.now() - start < 5000) {
+    // The wait must cover the SLOWEST supported boot path: the built bin
+    // prints the URL at ~3.3s, but the tsx source fallback needs ~6.2s. A
+    // 5s window silently missed it and left the probe hitting a tokenless
+    // URL, which dsh answers 401 forever.
+    while (!this.serverUrl && Date.now() - start < TOKEN_WAIT_MS) {
       if (this.backendProcess && this.backendProcess.exitCode !== null) break
       await new Promise((r) => setTimeout(r, 100))
     }
@@ -244,14 +291,31 @@ export class Launcher {
       try {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 3000)
-        const resp = await fetch(probeUrl, { signal: controller.signal })
+        // `redirect: 'manual'` is REQUIRED, not cosmetic.
+        //
+        // dsh answers a token-bearing GET with 303 + Set-Cookie and expects
+        // the client to replay that cookie on "/". Node's fetch (undici) keeps
+        // no cookie jar, so a default fetch follows the 303 to "/" with no
+        // cookie and gets 401 — the probe could never see a 200 no matter how
+        // valid the token was. (Measured: default -> 401, manual -> 303.)
+        //
+        // With manual redirect the 303 IS the success signal: it proves the
+        // token was accepted and the session cookie minted. Harness versions
+        // without token auth answer 200 instead, so accept anything < 400.
+        const resp = await fetch(probeUrl, {
+          signal: controller.signal,
+          redirect: 'manual',
+        })
         clearTimeout(timer)
-        if (resp.ok) {
+        const status = resp.status
+        // Drain the body so the socket is not left half-open between polls.
+        await resp.arrayBuffer().catch(() => {})
+        if (status < 400) {
           // Never persist the token: it grants access to the local web UI.
-          log('launcher', `Server ready at ${redactToken(probeUrl)}`)
+          log('launcher', `Server ready at ${redactToken(probeUrl)} (HTTP ${status})`)
           return probeUrl
         }
-        lastError = `HTTP ${resp.status}`
+        lastError = `HTTP ${status}`
       } catch (e) {
         lastError = (e as Error).message
       }
