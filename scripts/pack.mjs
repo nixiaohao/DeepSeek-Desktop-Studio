@@ -7,11 +7,12 @@
  *
  * Usage:  pnpm pack:auto   (or: node scripts/pack.mjs)
  */
-import { execSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { execSync, execFileSync } from 'node:child_process'
+import { existsSync, globSync } from 'node:fs'
 import { platform } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 const shellRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -54,3 +55,31 @@ execSync(`electron-builder ${req.flag}`, {
   stdio: 'inherit',
   env: { ...process.env, NODE_ENV: 'production' },
 })
+
+// On Windows, electron-builder's afterAllArtifactBuild hook can be blocked
+// by external file-system guards that intercept temporary-file cleanup.
+// Re-apply the icon to every .exe in dist/ so the final artifact always
+// carries the right icon even when that hook is skipped.
+if (os === 'win32') {
+  const require = createRequire(import.meta.url)
+  let rceditExe
+  try {
+    rceditExe = require.resolve('rcedit/bin/rcedit-x64.exe')
+  } catch {
+    rceditExe = join(shellRoot, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
+  }
+  if (existsSync(rceditExe)) {
+    const exes = globSync('*.exe', { cwd: join(shellRoot, 'dist') })
+    for (const exe of exes) {
+      const exePath = join(shellRoot, 'dist', exe)
+      try {
+        execFileSync(rceditExe, [exePath, '--set-icon', join(shellRoot, 'assets', 'icon.ico')], { stdio: 'inherit' })
+        console.log(`[pack] icon applied: ${exePath}`)
+      } catch (e) {
+        console.error(`[pack] failed to set icon on ${exePath}: ${e.message}`)
+      }
+    }
+  } else {
+    console.error('[pack] rcedit not found; skipping Windows icon fix')
+  }
+}

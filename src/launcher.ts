@@ -40,6 +40,8 @@ export class Launcher {
 
   private backendProcess: ChildProcess | null = null
   private currentVersion = '0.0.0'
+  /** URL with auth token printed by `dsh web` (newer harness versions). */
+  private serverUrl = ''
 
   constructor(workspaceDir: string) {
     this.sourceDir = workspaceDir
@@ -155,7 +157,24 @@ export class Launcher {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
-    proc.stdout?.on('data', (data: Buffer) => appendChildOutput('backend', `[OUT] ${data.toString()}`))
+    this.serverUrl = ''
+    let outBuf = ''
+    proc.stdout?.on('data', (data: Buffer) => {
+      const chunk = data.toString()
+      appendChildOutput('backend', `[OUT] ${chunk}`)
+      // Newer harness versions emit `dsh web: http://host:port/?token=...`.
+      // Wait checks the plain port first, but if a token URL appears we must
+      // use it: requests to the bare root will return 401 Unauthorized.
+      outBuf += chunk
+      if (!this.serverUrl) {
+        const m = /dsh web:\s+(http:\/\/[^\s\r\n]+)/.exec(outBuf)
+        if (m) {
+          this.serverUrl = m[1].trim()
+          log('launcher', `Captured dsh web URL: ${this.serverUrl}`)
+        }
+      }
+      if (outBuf.length > 4096) outBuf = outBuf.slice(-4096)
+    })
     proc.stderr?.on('data', (data: Buffer) => appendChildOutput('backend', `[ERR] ${data.toString()}`))
     proc.on('exit', (code) => log('launcher', `Backend process exited with code ${code}`))
     proc.on('error', (err) => log('launcher', `Backend process error: ${err.message}`))
@@ -187,6 +206,13 @@ export class Launcher {
   private async waitForServer(url: string, timeoutMs: number): Promise<void> {
     const start = Date.now()
     let lastError = ''
+    // Newer dsh versions print a tokenized URL a few seconds after boot.
+    // Wait briefly for that token before falling back to the bare URL.
+    while (!this.serverUrl && Date.now() - start < 5000) {
+      if (this.backendProcess && this.backendProcess.exitCode !== null) break
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    const probeUrl = this.serverUrl || url
     while (Date.now() - start < timeoutMs) {
       if (this.backendProcess && this.backendProcess.exitCode !== null) {
         throw new Error(
@@ -198,10 +224,10 @@ export class Launcher {
       try {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 3000)
-        const resp = await fetch(url, { signal: controller.signal })
+        const resp = await fetch(probeUrl, { signal: controller.signal })
         clearTimeout(timer)
         if (resp.ok) {
-          log('launcher', `Server ready at ${url}`)
+          log('launcher', `Server ready at ${probeUrl}`)
           return
         }
         lastError = `HTTP ${resp.status}`
@@ -212,7 +238,7 @@ export class Launcher {
     }
     log('launcher', `Server NOT ready after ${timeoutMs}ms, last error: ${lastError}`)
     throw new Error(
-      `服务在 ${timeoutMs / 1000} 秒内未就绪: ${url}\n最后错误: ${lastError}\n` +
+      `服务在 ${timeoutMs / 1000} 秒内未就绪: ${probeUrl}\n最后错误: ${lastError}\n` +
       `完整日志：${getLogDir()}\\backend.log`
     )
   }

@@ -8,8 +8,8 @@
     "dev": "tsc && electron .",
     "build": "tsc",
     "start": "electron .",
-    "pack": "tsc && electron-builder --win",
-    "pack:win": "tsc && electron-builder --win",
+    "pack": "tsc && node scripts/pack.mjs",
+    "pack:win": "tsc && node scripts/pack.mjs",
     "pack:mac": "tsc && electron-builder --mac",
     "pack:linux": "tsc && electron-builder --linux",
     "pack:auto": "node scripts/pack.mjs"
