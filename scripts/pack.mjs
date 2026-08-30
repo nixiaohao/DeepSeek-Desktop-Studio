@@ -8,7 +8,7 @@
  * Usage:  pnpm pack:auto   (or: node scripts/pack.mjs)
  */
 import { execSync, execFileSync } from 'node:child_process'
-import { existsSync, globSync } from 'node:fs'
+import { existsSync, globSync, rmSync } from 'node:fs'
 import { platform } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,29 +49,60 @@ if (os === 'darwin') {
   console.log('[pack] 提示: AppImage 需 chmod +x 后运行。')
 }
 
-console.log(`[pack] 平台: ${os} → electron-builder ${req.flag}`)
-execSync(`electron-builder ${req.flag}`, {
-  cwd: shellRoot,
-  stdio: 'inherit',
-  env: { ...process.env, NODE_ENV: 'production' },
-})
+const distDir = join(shellRoot, 'dist')
 
-// On Windows, electron-builder's afterAllArtifactBuild hook can be blocked
-// by external file-system guards that intercept temporary-file cleanup.
-// Re-apply the icon to every .exe in dist/ so the final artifact always
-// carries the right icon even when that hook is skipped.
+// Drop stale artifacts first: a build that dies before producing output must
+// never be mistaken for a success just because last run's .exe is still there.
+// The intermediate NSIS archive matters most — electron-builder has to remove
+// it before it can assemble the final executable, and a stale 100MB archive
+// that cannot be deleted aborts the build (leaving a stub-sized .exe).
+if (os === 'win32') {
+  for (const pattern of ['*.exe', '*.7z']) {
+    for (const stale of globSync(pattern, { cwd: distDir })) {
+      try {
+        rmSync(join(distDir, stale), { force: true })
+        console.log(`[pack] removed stale artifact: ${stale}`)
+      } catch {
+        /* best-effort: a locked file simply stays and is reported below */
+      }
+    }
+  }
+}
+
+console.log(`[pack] 平台: ${os} → electron-builder ${req.flag}`)
+let builderError = null
+try {
+  execSync(`electron-builder ${req.flag}`, {
+    cwd: shellRoot,
+    stdio: 'inherit',
+    env: { ...process.env, NODE_ENV: 'production' },
+  })
+} catch (e) {
+  // electron-builder can exit non-zero AFTER the artifact is complete, for
+  // example when a file guard blocks its final temporary-file cleanup. Judge
+  // by the artifacts instead of the exit code.
+  builderError = e
+}
+
+// On Windows, re-apply the icon to every produced .exe. electron-builder's
+// own rcedit pass (afterAllArtifactBuild) is skipped whenever the build
+// aborts during cleanup — precisely the case above.
+let produced = []
 if (os === 'win32') {
   const require = createRequire(import.meta.url)
   let rceditExe
   try {
     rceditExe = require.resolve('rcedit/bin/rcedit-x64.exe')
   } catch {
+    // rcedit's package exports do not expose the binary; use the on-disk path.
     rceditExe = join(shellRoot, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe')
   }
-  if (existsSync(rceditExe)) {
-    const exes = globSync('*.exe', { cwd: join(shellRoot, 'dist') })
-    for (const exe of exes) {
-      const exePath = join(shellRoot, 'dist', exe)
+  produced = globSync('*.exe', { cwd: distDir })
+  if (!existsSync(rceditExe)) {
+    console.error('[pack] rcedit not found; skipping Windows icon fix')
+  } else {
+    for (const exe of produced) {
+      const exePath = join(distDir, exe)
       try {
         execFileSync(rceditExe, [exePath, '--set-icon', join(shellRoot, 'assets', 'icon.ico')], { stdio: 'inherit' })
         console.log(`[pack] icon applied: ${exePath}`)
@@ -79,7 +110,14 @@ if (os === 'win32') {
         console.error(`[pack] failed to set icon on ${exePath}: ${e.message}`)
       }
     }
+  }
+}
+
+if (builderError) {
+  if (produced.length > 0) {
+    console.error('[pack] electron-builder exited non-zero, but the artifact was produced.')
   } else {
-    console.error('[pack] rcedit not found; skipping Windows icon fix')
+    console.error('[pack] electron-builder failed and produced no artifact.')
+    process.exit(1)
   }
 }

@@ -28,6 +28,12 @@ const DEFAULT_PORT = 3080
 
 export interface LaunchResult {
   port: number
+  /**
+   * URL the main window must load. Newer harness versions hand out a
+   * per-process token (`/?token=...`) and answer a tokenless `/` with 401,
+   * so the window needs the same authenticated URL the readiness probe used.
+   */
+  url: string
   version: string
   hadUpdate: boolean
 }
@@ -101,9 +107,9 @@ export class Launcher {
     this.backendProcess = this.spawnDshWeb(port)
 
     reportProgress('等待服务就绪...')
-    await this.waitForServer(`http://127.0.0.1:${port}`, SERVER_TIMEOUT_MS)
+    const readyUrl = await this.waitForServer(`http://127.0.0.1:${port}`, SERVER_TIMEOUT_MS)
 
-    return { port, version: this.version, hadUpdate }
+    return { port, url: readyUrl, version: this.version, hadUpdate }
   }
 
   /**
@@ -161,7 +167,8 @@ export class Launcher {
     let outBuf = ''
     proc.stdout?.on('data', (data: Buffer) => {
       const chunk = data.toString()
-      appendChildOutput('backend', `[OUT] ${chunk}`)
+      // The readiness URL carries a live credential; keep it out of backend.log.
+      appendChildOutput('backend', `[OUT] ${redactTokenInText(chunk)}`)
       // Newer harness versions emit `dsh web: http://host:port/?token=...`.
       // Wait checks the plain port first, but if a token URL appears we must
       // use it: requests to the bare root will return 401 Unauthorized.
@@ -170,7 +177,9 @@ export class Launcher {
         const m = /dsh web:\s+(http:\/\/[^\s\r\n]+)/.exec(outBuf)
         if (m) {
           this.serverUrl = m[1].trim()
-          log('launcher', `Captured dsh web URL: ${this.serverUrl}`)
+          // Log the origin only: the token grants access to the local web UI
+          // and must never reach disk.
+          log('launcher', `Captured dsh web URL: ${redactToken(this.serverUrl)}`)
         }
       }
       if (outBuf.length > 4096) outBuf = outBuf.slice(-4096)
@@ -196,14 +205,19 @@ export class Launcher {
     this.backendProcess = this.spawnDshWeb(port)
 
     reportProgress('等待服务就绪...')
-    await this.waitForServer(`http://127.0.0.1:${port}`, SERVER_TIMEOUT_MS)
+    const readyUrl = await this.waitForServer(`http://127.0.0.1:${port}`, SERVER_TIMEOUT_MS)
 
-    return { port, version: this.version, hadUpdate: false }
+    return { port, url: readyUrl, version: this.version, hadUpdate: false }
   }
 
-  /** Poll a URL until it responds 200 or timeout. Fails FAST when the
-   *  backend process died — no more blind 120-second waits. */
-  private async waitForServer(url: string, timeoutMs: number): Promise<void> {
+  /**
+   * Poll a URL until it responds 200 or timeout. Fails FAST when the
+   * backend process died — no more blind 120-second waits.
+   *
+   * Returns the URL that answered, so the caller can hand the same
+   * authenticated URL to the browser window.
+   */
+  private async waitForServer(url: string, timeoutMs: number): Promise<string> {
     const start = Date.now()
     let lastError = ''
     // Newer dsh versions print a tokenized URL a few seconds after boot.
@@ -227,8 +241,9 @@ export class Launcher {
         const resp = await fetch(probeUrl, { signal: controller.signal })
         clearTimeout(timer)
         if (resp.ok) {
-          log('launcher', `Server ready at ${probeUrl}`)
-          return
+          // Never persist the token: it grants access to the local web UI.
+          log('launcher', `Server ready at ${redactToken(probeUrl)}`)
+          return probeUrl
         }
         lastError = `HTTP ${resp.status}`
       } catch (e) {
@@ -238,7 +253,7 @@ export class Launcher {
     }
     log('launcher', `Server NOT ready after ${timeoutMs}ms, last error: ${lastError}`)
     throw new Error(
-      `服务在 ${timeoutMs / 1000} 秒内未就绪: ${probeUrl}\n最后错误: ${lastError}\n` +
+      `服务在 ${timeoutMs / 1000} 秒内未就绪: ${redactToken(probeUrl)}\n最后错误: ${lastError}\n` +
       `完整日志：${getLogDir()}\\backend.log`
     )
   }
@@ -271,6 +286,35 @@ export class Launcher {
 }
 
 // ── Helpers ──
+
+/**
+ * Mask the per-process web token before a URL reaches a log file or an error
+ * dialog.
+ *
+ * `dsh web` mints a fresh token with crypto.randomBytes on every launch and
+ * keeps it only in memory, so it is not a durable secret — but it is a live
+ * credential for the local web UI, and logs live in the user's AppData where
+ * other processes (and the user when sharing logs for support) can read them.
+ * Never write it out.
+ */
+function redactToken(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.searchParams.has('token')) parsed.searchParams.set('token', '***')
+    return parsed.href
+  } catch {
+    return url
+  }
+}
+
+/**
+ * Mask `token=<value>` parameters in free-form child-process output before it
+ * is appended to backend.log. The harness prints its authenticated URL there,
+ * and that log is the one users send along with a bug report.
+ */
+function redactTokenInText(text: string): string {
+  return text.replace(/(token=)[A-Za-z0-9_-]+/gu, '$1***')
+}
 
 /** Find an available port starting from the given one */
 async function findAvailablePort(startPort: number): Promise<number> {

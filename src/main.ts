@@ -83,7 +83,14 @@ function createSplash(): BrowserWindow {
 
 // ── Main Window ──
 
-function createMainWindow(port: number): BrowserWindow {
+/**
+ * Open the main window on the authenticated web URL.
+ *
+ * The harness hands out a per-process token; a tokenless `/` is answered with
+ * 401. Loading the same URL the readiness probe used lets the server mint its
+ * HttpOnly session cookie, after which plain navigation keeps working.
+ */
+function createMainWindow(url: string): BrowserWindow {
   const prefs = loadPreferences()
   const win = new BrowserWindow({
     width: prefs.windowBounds.width,
@@ -112,7 +119,7 @@ function createMainWindow(port: number): BrowserWindow {
     })
   }
 
-  win.loadURL(`http://127.0.0.1:${port}`)
+  win.loadURL(url)
 
   win.once('ready-to-show', () => {
     splashWindow?.close()
@@ -516,7 +523,7 @@ app.whenReady().then(async () => {
       const result = await launcher!.launch((msg) => {
         splashWindow?.webContents.send('progress', msg)
       })
-      mainWindow = createMainWindow(result.port)
+      mainWindow = createMainWindow(result.url)
       createTray(mainWindow, launcher!, quitApp)
 
       // Plugin market: ask once, install on request, stream progress into a
