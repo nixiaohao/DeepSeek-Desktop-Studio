@@ -704,12 +704,20 @@ export class RuntimeSource {
    * That false negative made needsInstall() report "needs install" on every
    * launch, re-running a dependency install AND a full build (≈21s) before
    * every start.
+   *
+   * The store entry must also be POPULATED, not merely present. pnpm creates a
+   * package's directory before linking its contents, so an install that was
+   * killed leaves entries that exist but are empty — and it then reports
+   * "Already up to date" and refuses to re-link them. Matching on the
+   * directory name alone calls that installed.
    */
   private hasStoredDep(name: string): boolean {
     const store = join(this.dir, 'node_modules', '.pnpm')
     const slug = `${name.replace('/', '+')}@`
     try {
-      return readdirSync(store).some((entry) => entry.startsWith(slug))
+      return readdirSync(store)
+        .filter((entry) => entry.startsWith(slug))
+        .some((entry) => existsSync(join(store, entry, 'node_modules', name, 'package.json')))
     } catch {
       return false
     }
@@ -889,7 +897,39 @@ export class RuntimeSource {
       return
     }
     if (needInstall) await this.installDeps(progress)
-    if (needBuild) await this.buildAll(progress)
+    if (needBuild) {
+      try {
+        await this.buildAll(progress)
+      } catch (err) {
+        // The likeliest cause of a build that has never worked on this
+        // workspace is an install that never finished. pnpm creates a
+        // dependency's directory first and links its contents afterwards, so
+        // an install that was killed (app closed, power loss, disk full) leaves
+        // directories that exist but are EMPTY — and pnpm then reports "Already
+        // up to date" and refuses to re-link them. Every probe that checks
+        // whether the directory is there reports success, so the install is
+        // skipped and the build dies on "cannot find module" for a dependency
+        // that package.json plainly lists.
+        //
+        // Reinstalling is the cheapest repair and needs no per-package list to
+        // keep in sync, so spend one attempt on it before concluding that the
+        // build itself is broken.
+        if (needInstall) throw err // we just installed — rebuilding cannot help
+        log(
+          'launcher',
+          `ensureReady: build failed, retrying after dependency install: ${(err as Error).message.slice(0, 200)}`
+        )
+        progress('构建失败，正在重新安装依赖后重试（可能是上次安装被中断）...')
+        // A plain `pnpm install` here would report "Already up to date" and
+        // change nothing — see forceDependencyRelink.
+        this.forceDependencyRelink()
+        await this.installDeps(progress)
+        // Let a second failure propagate. At that point the dependencies are
+        // known-good, so the problem is the build itself — which is what the
+        // update and rollback paths exist to handle.
+        await this.buildAll(progress)
+      }
+    }
   }
 
   private async buildAll(progress: ProgressFn): Promise<void> {
@@ -1750,50 +1790,19 @@ export class RuntimeSource {
   }
 
   /**
-   * Delete build output left behind by packages that upstream deleted.
-   *
-   * `git reset --hard` only touches tracked files, so the compiled `lib/` and
-   * `dist/` directories of a removed package survive an update — they are
-   * gitignored. The next build then picks those stale `.js` files up as
-   * modules and fails the whole repository build with MISSING_EXPORT, because
-   * they import symbols the new source no longer exports. Since the build
-   * gates startup, the app becomes permanently unlaunchable: every attempt
-   * retries the same broken build.
-   *
-   * A slot counts as orphaned when it holds build output but has no
-   * package.json — i.e. the package itself is gone in the new revision. Only
-   * the artifact directories are removed; nothing else in the slot is touched.
-   *
-   * Returns the removed paths (workspace-relative) for logging and progress.
-   */
-  pruneOrphanedArtifacts(progress?: ProgressFn): string[] {
-    const pruned: string[] = []
-    for (const slot of this.packageSlots()) {
-      if (existsSync(join(slot, 'package.json'))) continue // live package
-      for (const artifact of RuntimeSource.ARTIFACT_DIRS) {
-        const target = join(slot, artifact)
-        if (!existsSync(target)) continue
-        try {
-          rmSync(target, { recursive: true, force: true })
-          pruned.push(target.slice(this.dir.length + 1))
-        } catch (err) {
-          log('launcher', `pruneOrphanedArtifacts: failed on ${target}: ${(err as Error).message.slice(0, 160)}`)
-        }
-      }
-    }
-    if (pruned.length > 0) {
-      log('launcher', `pruneOrphanedArtifacts: removed ${String(pruned.length)}: ${pruned.join(', ')}`)
-      progress?.(`已清理 ${String(pruned.length)} 个被上游删除包的残留产物`)
-    }
-    return pruned
-  }
-
-  /**
    * Remove ALL build artifacts (lib/, dist/) from every package slot.
    *
-   * Unlike pruneOrphanedArtifacts — which only cleans packages that were
-   * *deleted* upstream — this removes artifacts from EVERY package regardless
-   * of whether it still exists.
+   * Cleaning only the packages upstream *deleted* is not enough. That covers
+   * `git reset --hard` leaving a removed package's gitignored `lib/` behind,
+   * where the next build picks those stale `.js` files up as modules and fails
+   * the whole repository build with MISSING_EXPORT, because they import
+   * symbols the new source no longer exports. Since the build gates startup,
+   * the app becomes permanently unlaunchable: every attempt retries the same
+   * broken build.
+   *
+   * The harder case is a package that still exists and whose stale output is
+   * still trusted, so this pass cleans every slot rather than only the
+   * package-less ones:
    *
    * This is necessary after a channel switch (git reset --hard to a different
    * version) because:
@@ -2302,6 +2311,46 @@ export class RuntimeSource {
   }
 
   // ── Dependencies ──
+
+  /**
+   * Make the next `pnpm install` actually re-link instead of short-circuiting.
+   *
+   * pnpm records a completed install in a state file next to node_modules
+   * (`.pnpm-workspace-state-v1.json` on pnpm 11+, `.modules.yaml` on earlier
+   * versions). Once that file agrees with the lockfile, pnpm reports "Already
+   * up to date" and skips the linking phase altogether — which makes an install
+   * that was killed halfway STICKY. The directories pnpm had already created
+   * stay empty, every probe that checks whether the directory exists reports
+   * success, `pnpm install` insists there is nothing to do, and the build dies
+   * on "cannot find module" for a dependency that package.json plainly lists.
+   *
+   * Note that neither `--force` nor deleting the lockfile marker
+   * (`node_modules/.pnpm/lock.yaml`) is enough: both still leave pnpm
+   * short-circuiting on the workspace state file.
+   *
+   * Removing the state file forces the linking phase to run again. It does not
+   * discard the package store, so a relink needs no network and is far cheaper
+   * than the build it is trying to save.
+   *
+   * Only for repair paths — running this on every launch would turn every
+   * install into a full relink.
+   */
+  private forceDependencyRelink(): void {
+    const markers = ['.pnpm-workspace-state-v1.json', '.modules.yaml']
+    for (const marker of markers) {
+      const target = join(this.dir, 'node_modules', marker)
+      if (!existsSync(target)) continue
+      try {
+        rmSync(target, { force: true })
+        log('launcher', `forceDependencyRelink: removed ${marker}`)
+      } catch (err) {
+        log(
+          'launcher',
+          `forceDependencyRelink: failed on ${marker}: ${(err as Error).message.slice(0, 160)}`
+        )
+      }
+    }
+  }
 
   /**
    * Install dependencies with pnpm. On failure, attempt to roll the code
