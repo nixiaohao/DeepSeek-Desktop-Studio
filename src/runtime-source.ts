@@ -755,19 +755,61 @@ export class RuntimeSource {
   ] as const
 
   /**
-   * True when the frontend client bundle has not been built yet.
+   * True when the web client bundle is missing, or when the backend build
+   * output is missing even though the frontend bundle is on disk.
    *
    * Checks for the actual build artifact (index.html), not just the output
    * directory — a partially built or interrupted build leaves the directory
    * behind but no usable bundle, and we must not skip the rebuild in that
    * case. A successfully built bundle is a stable cache: subsequent launches
    * skip the (multi-minute) frontend build entirely.
+   *
+   * The frontend alone is NOT a sufficient signal. Both faces come out of the
+   * same build script but are cached separately here, so a workspace can very
+   * easily hold `apps/web/dist/index.html` while every
+   * `packages/<group>/<pkg>/lib` is gone — an interrupted build, a hand
+   * cleanup, or a channel switch whose
+   * client build finished before the backend build was rolled back. Nothing
+   * else in the startup gate inspects the backend output, so the launch would
+   * fall through to spawning `dsh web` and die with ERR_MODULE_NOT_FOUND on
+   * the first import, with no path back except editing the workspace by hand.
+   *
+   * Including the backend keeps that state repairable: one rebuild fixes it.
    */
   needsBuild(): boolean {
     for (const parts of RuntimeSource.CLIENT_BUNDLE_CANDIDATES) {
-      if (existsSync(join(this.dir, ...parts))) return false
+      if (existsSync(join(this.dir, ...parts))) {
+        // Frontend is built — only trust it when the backend is built too.
+        return this.hasMissingBackendArtifacts()
+      }
     }
     return true
+  }
+
+  /**
+   * True when a package that should have build output has none.
+   *
+   * Only packages that exist in the checked-out revision count: one that
+   * upstream deleted has neither source nor output, and treating it as
+   * "missing" would pin needsBuild() to true forever — a full multi-minute
+   * rebuild on EVERY launch, which is worse than the failure this guards
+   * against.
+   */
+  private hasMissingBackendArtifacts(): boolean {
+    for (const entry of RuntimeSource.CRITICAL_EXPORTS) {
+      const filePath = join(this.dir, entry.rel)
+      if (existsSync(filePath)) continue
+      // <pkg>/lib/index.js → <pkg>. No manifest means the package simply does
+      // not exist in this revision, so there is nothing to rebuild.
+      const pkgDir = dirname(dirname(filePath))
+      if (!existsSync(join(pkgDir, 'package.json'))) continue
+      log(
+        'launcher',
+        `needsBuild: backend artifact missing while frontend is built: ${entry.rel}`
+      )
+      return true
+    }
+    return false
   }
 
   /**
@@ -1674,7 +1716,16 @@ export class RuntimeSource {
   /** Build output directories emitted by the harness build (gitignored). */
   private static readonly ARTIFACT_DIRS = ['lib', 'dist'] as const
 
-  /** Directories that can hold a workspace package: packages/<group>/<pkg>. */
+  /**
+   * Directories that can hold a workspace package.
+   *
+   * This MUST match the build targets in tsdown.config.ts, whose workspace
+   * list is `vendor/<pkg>`, `packages/<group>/<pkg>` and `apps/cli`: a
+   * directory that the build writes `lib/` into but that is missing here keeps
+   * its stale output across a channel switch, because neither cleanup pass can
+   * see it. `apps` is a superset of `apps/cli` — the extra slots are harmless
+   * (they simply hold no build output).
+   */
   private packageSlots(): string[] {
     const slots: string[] = []
     const listDirs = (dir: string): string[] => {
@@ -1689,6 +1740,11 @@ export class RuntimeSource {
     for (const group of listDirs(join(this.dir, 'packages'))) {
       slots.push(...listDirs(group))
     }
+    // Vendored framework packages (cordis, cosmokit, schemastery, ...) are
+    // first-class workspace members and build targets — they ship src/ and are
+    // compiled into lib/ like everything else. cordis in particular is the
+    // plugin loader: a stale copy of it breaks every plugin load.
+    slots.push(...listDirs(join(this.dir, 'vendor')))
     slots.push(...listDirs(join(this.dir, 'apps')))
     return slots
   }

@@ -5,10 +5,11 @@
   "description": "DeepSeek Studio — Electron desktop shell for deepseek-harness",
   "main": "lib-new/main.js",
   "scripts": {
-    "test": "node test/channels.unit.cjs && node test/channels.e2e.cjs && node test/critical-exports.cjs",
+    "test": "node test/channels.unit.cjs && node test/channels.e2e.cjs && node test/critical-exports.cjs && node test/needs-build.cjs",
     "test:unit": "node test/channels.unit.cjs",
     "test:e2e": "node test/channels.e2e.cjs",
     "test:exports": "node test/critical-exports.cjs",
+    "test:build-gate": "node test/needs-build.cjs",
     "dev": "tsc && electron .",
     "build": "tsc",
     "start": "electron .",
