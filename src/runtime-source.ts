@@ -13,9 +13,10 @@
  * Timeouts (deliberately generous for slow networks / cold starts):
  *   fetch    120s | clone 15min | install 30min | build 30min
  */
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
+import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import { join, dirname, isAbsolute, resolve as pathResolve } from 'node:path'
 import {
   existsSync,
@@ -79,6 +80,96 @@ export interface UpdateResult {
   /** True when the update was skipped (no git / network failure) */
   skipped: boolean
   reason?: string
+}
+
+/**
+ * Collect the names a built ESM file exports, by parsing its export
+ * statements. Handles the shapes bundlers actually emit:
+ *   export { a, b as c }            → a, c
+ *   export { x } from './y'         → x
+ *   export function|const|let|var|class name
+ *   export default …                → default
+ *
+ * Deliberately does NOT follow `export * from './x'` (unresolvable without
+ * full module resolution) — callers must treat a miss as "unverified", not
+ * "missing". See probeModuleExports().
+ */
+function collectEsmExports(src: string): Set<string> {
+  const names = new Set<string>()
+
+  // `export { … }` clause, optionally followed by `from '…'`.
+  const clauseRe = /export\s*\{([^}]*)\}(?:\s*from\s*(['"])[^'"]*\2)?/g
+  // `export function foo` / `export const foo` / `export class foo` / `export async function foo`
+  const declRe =
+    /export\s+(?:async\s+)?(?:function\s*\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g
+
+  let m: RegExpExecArray | null
+  while ((m = clauseRe.exec(src)) !== null) {
+    for (const part of m[1].split(',')) {
+      const spec = part.trim()
+      if (!spec) continue
+      // `local as exported` → the exported name is what follows `as`.
+      const asMatch = /\s+as\s+([A-Za-z_$][\w$]*)$/.exec(spec)
+      if (asMatch) {
+        names.add(asMatch[1])
+        continue
+      }
+      // Plain `name` (possibly `default`).
+      if (/^[A-Za-z_$][\w$]*$/.test(spec)) names.add(spec)
+    }
+  }
+  while ((m = declRe.exec(src)) !== null) names.add(m[1])
+  if (/\bexport\s+default\b/.test(src)) names.add('default')
+
+  return names
+}
+
+/**
+ * Ground-truth check: really import a module in a throwaway child process and
+ * return its export names.
+ *
+ * Returns null when the probe could not run or the module could not be
+ * imported — callers must treat null as "inconclusive, do not block".
+ *
+ * Runs in a separate process so a module with top-level side effects cannot
+ * pollute the host, and so an import that hangs or throws cannot take the
+ * app down with it.
+ */
+async function probeModuleExports(
+  node: { path: string; useElectron: boolean },
+  filePath: string
+): Promise<string[] | null> {
+  // With `-e`, the first user argument lands at process.argv[1].
+  const script =
+    'import(process.argv[1])' +
+    '.then((m) => { process.stdout.write(JSON.stringify(Object.keys(m))) })' +
+    '.catch(() => { process.stdout.write("__PROBE_FAILED__") })'
+  try {
+    const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
+      execFile(
+        node.path,
+        ['-e', script, pathToFileURL(filePath).href],
+        {
+          cwd: dirname(filePath),
+          timeout: 30_000,
+          windowsHide: true,
+          maxBuffer: 8 * 1024 * 1024,
+          env: {
+            ...process.env,
+            // Electron binaries only behave like Node with this set.
+            ...(node.useElectron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+          },
+        },
+        (err, stdout) => (err ? reject(err) : resolve({ stdout: String(stdout) }))
+      )
+    })
+    const out = stdout.trim()
+    if (!out || out === '__PROBE_FAILED__') return null
+    const parsed: unknown = JSON.parse(out)
+    return Array.isArray(parsed) ? parsed.map(String) : null
+  } catch {
+    return null
+  }
 }
 
 export class RuntimeSource {
@@ -660,6 +751,28 @@ export class RuntimeSource {
     const needInstall = this.needsInstall()
     const needBuild = needInstall || this.needsBuild()
     if (!needInstall && !needBuild) {
+      // Artifacts are already on disk, and nothing re-verifies them until the
+      // next update. An upstream breaking change — or an interrupted build —
+      // can leave a workspace that looks built but is missing exports plugins
+      // import; it would otherwise surface much later as a cryptic
+      // "does not provide an export named X" crash at plugin load time.
+      const problem = await this.detectMissingCriticalExports()
+      if (problem) {
+        // Recovery: rebuild once. This repairs stale or half-written
+        // artifacts, which is the recoverable half of this failure mode.
+        // Throttled by time rather than by commit, so it also works for
+        // ZIP-copied workspaces that have no git history to key on.
+        if (this.exportRepairRecentlyAttempted()) {
+          // A rebuild already failed to fix this recently. Fail fast with the
+          // real explanation instead of spending minutes on a doomed rebuild
+          // at every single launch.
+          throw new Error(problem)
+        }
+        progress('构建产物缺少插件所需的导出，正在尝试重新构建...')
+        this.markExportRepairAttempted()
+        await this.buildAll(progress) // throws a message naming the export
+        return
+      }
       progress('依赖与构建已就绪，无需重复安装/构建')
       return
     }
@@ -712,6 +825,100 @@ export class RuntimeSource {
       progress,
       '构建'
     )
+    // Verify that exports third-party plugins depend on actually survived the
+    // build. Upstream sometimes refactors a package between versions (e.g.
+    // @deepseek-ai/dsh-settings 0.1.2-alpha.2 dropped `settingsNamespace` and
+    // `installSettingsSection`) and the build script still exits 0 — the app
+    // then dies at plugin load time and stays permanently unlaunchable.
+    // Catching it here turns that into an automatic rollback instead.
+    await this.verifyCriticalExports(node)
+  }
+
+  /**
+   * Exports known to be required by popular third-party plugins, keyed by the
+   * built ESM entry of the workspace package that is supposed to provide them.
+   *
+   * ONLY add entries verified against a real build. A wrong entry would roll
+   * the user back to an older version for no reason.
+   */
+  private static readonly CRITICAL_EXPORTS: ReadonlyArray<{
+    pkg: string
+    /** Path relative to the workspace root. */
+    rel: string
+    exports: readonly string[]
+  }> = [
+    {
+      pkg: '@deepseek-ai/dsh-settings',
+      rel: join('packages', 'settings', 'settings', 'lib', 'index.js'),
+      exports: ['settingsNamespace', 'installSettingsSection'],
+    },
+  ]
+
+  /**
+   * Report the first built package that is missing an export third-party
+   * plugins import. Returns a human-readable message, or null when everything
+   * checks out.
+   *
+   * Two stages, deliberately:
+   *   1. Parse the ESM export statements statically — cheap, no side effects.
+   *   2. If a name looks missing, re-check by really importing the module in a
+   *      throwaway child process. Static parsing cannot follow `export * from`
+   *      or CJS interop, and a false positive here would trigger an endless
+   *      update/rollback loop — worse than the bug it guards against.
+   *
+   * `node` is optional: when omitted it is resolved lazily, only if stage 2 is
+   * actually reached. Keep it that way — this runs on every launch, and node
+   * detection spawns a subprocess.
+   */
+  private async detectMissingCriticalExports(node?: {
+    path: string
+    useElectron: boolean
+  }): Promise<string | null> {
+    for (const entry of RuntimeSource.CRITICAL_EXPORTS) {
+      const filePath = join(this.dir, entry.rel)
+      // Package does not exist in this upstream version — nothing to check.
+      if (!existsSync(filePath)) continue
+      let src: string
+      try {
+        src = readFileSync(filePath, 'utf-8')
+      } catch {
+        continue // unreadable — don't fail the build on an I/O hiccup
+      }
+
+      const declared = collectEsmExports(src)
+      const missing = entry.exports.filter((name) => !declared.has(name))
+      if (missing.length === 0) continue
+
+      const actual = await probeModuleExports(node ?? resolveNodeBin(), filePath)
+      if (actual === null) continue // probe inconclusive — stay silent
+      const stillMissing = missing.filter((name) => !actual.includes(name))
+      if (stillMissing.length === 0) continue
+
+      return (
+        `构建产物缺少关键导出：${entry.pkg} 未提供「${stillMissing.join('、')}」。` +
+          `第三方插件（如 dshmarket、dsh-config-manager）依赖这些导出，缺失会导致启动即崩溃。` +
+          `这通常是上游版本引入了 breaking change。`
+      )
+    }
+    return null
+  }
+
+  /**
+   * Fail the build when a critical export is missing from a built package, so
+   * the caller (buildAll → applyUpdate) treats it as a build failure and rolls
+   * back to the previously working revision.
+   */
+  private async verifyCriticalExports(node: {
+    path: string
+    useElectron: boolean
+  }): Promise<void> {
+    const problem = await this.detectMissingCriticalExports(node)
+    if (problem) {
+      throw new Error(
+        `${problem}Shell 会尝试回退到上一个可用版本；若是首次安装（尚无历史版本可回退），` +
+          `请稍后重试或等待上游修复。`
+      )
+    }
   }
 
   /**
@@ -1412,6 +1619,42 @@ export class RuntimeSource {
 
   private clearFailedCommit(): void {
     try { rmSync(this.failedCommitFile(), { force: true }) } catch { /* best-effort */ }
+  }
+
+  // ── Artifact-repair throttle ──
+
+  /**
+   * Timestamp (epoch ms) of the last automatic rebuild triggered by a missing
+   * critical export at startup.
+   *
+   * Keyed on time, not on a commit: the workspace may have no git history at
+   * all (ZIP-copied), and there is no stable revision id to key on in that
+   * case. Bounding by time caps the worst case at one repair rebuild per day.
+   */
+  private exportRepairFile(): string {
+    return join(this.dir, '.dsh', 'last-export-repair.txt')
+  }
+
+  /** Minimum delay between two automatic repair rebuilds. */
+  private static readonly EXPORT_REPAIR_COOLDOWN_MS = 24 * 60 * 60 * 1000
+
+  private exportRepairRecentlyAttempted(): boolean {
+    try {
+      const last = Number(readFileSync(this.exportRepairFile(), 'utf-8').trim())
+      if (!Number.isFinite(last) || last <= 0) return false
+      return Date.now() - last < RuntimeSource.EXPORT_REPAIR_COOLDOWN_MS
+    } catch {
+      return false
+    }
+  }
+
+  private markExportRepairAttempted(): void {
+    try {
+      mkdirSync(dirname(this.exportRepairFile()), { recursive: true })
+      writeFileSync(this.exportRepairFile(), String(Date.now()), 'utf-8')
+    } catch {
+      /* best-effort */
+    }
   }
 
   // ── Update-check throttle ──
