@@ -806,8 +806,15 @@ export class RuntimeSource {
           // doomed rebuild at every single launch.
           throw new Error(problem)
         }
-        progress('构建产物缺少插件所需的导出，正在尝试重新构建...')
+        progress('构建产物缺少插件所需的导出，正在清理并重新构建...')
         this.markExportRepairAttempted()
+        // Stale artifacts from a previous version can cause export mismatches
+        // even when the source code is correct — e.g. alpha.2's dsh-tools/lib
+        // imported @deepseek-ai/dsh-util-values which rc.2 does not declare.
+        // tsdown's incremental build skips "unchanged" packages, so a plain
+        // buildAll() would leave those broken .js in place. Clean first so
+        // the rebuild is genuinely full.
+        this.cleanAllBuildArtifacts(progress)
         try {
           await this.buildAll(progress) // throws a message naming the export
           return
