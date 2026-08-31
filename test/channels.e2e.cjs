@@ -197,6 +197,27 @@ check('channel() still reports the configured channel', emptySrc.channel(), 'nex
   const fromAlpha = await src.checkUpdate(() => {})
   check('on alpha with channel=next → update reported (must move back)', fromAlpha, true)
 
+  console.log('\n=== H. Repair cooldown must not outlive a channel switch ===')
+  // The escape hatch (DSH_CHANNEL / menu switch) is worthless if the failed
+  // channel's 24h cooldown also blocks the new channel from being tried.
+  // These are private methods; TS privacy is compile-time only, and the
+  // behaviour they encode is what makes an automatic recovery possible.
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-repair-'))
+  const probe = new RuntimeSource(probeDir)
+  process.env.DSH_CHANNEL = 'next'
+  check('no marker → repair may run', probe.exportRepairRecentlyAttempted(), false)
+  probe.markExportRepairAttempted()
+  check('same channel → on cooldown', probe.exportRepairRecentlyAttempted(), true)
+  process.env.DSH_CHANNEL = 'alpha'
+  check('switching channel earns a fresh attempt', probe.exportRepairRecentlyAttempted(), false)
+  process.env.DSH_CHANNEL = 'next'
+  check('back on the original channel → still on cooldown', probe.exportRepairRecentlyAttempted(), true)
+  const marker = path.join(probeDir, '.dsh', 'last-export-repair.txt')
+  fs.writeFileSync(marker, `${Date.now() - 25 * 60 * 60 * 1000} next`, 'utf-8')
+  check('marker older than 24h → repair may run again', probe.exportRepairRecentlyAttempted(), false)
+  delete process.env.DSH_CHANNEL
+  fs.rmSync(probeDir, { recursive: true, force: true })
+
   fs.rmSync(ROOT, { recursive: true, force: true })
   console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'}: ${pass} passed, ${fail} failed`)
   process.exit(fail === 0 ? 0 : 1)

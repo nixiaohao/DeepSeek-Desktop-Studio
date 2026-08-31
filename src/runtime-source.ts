@@ -801,15 +801,34 @@ export class RuntimeSource {
         // Throttled by time rather than by commit, so it also works for
         // ZIP-copied workspaces that have no git history to key on.
         if (this.exportRepairRecentlyAttempted()) {
-          // A rebuild already failed to fix this recently. Fail fast with the
-          // real explanation instead of spending minutes on a doomed rebuild
-          // at every single launch.
+          // A rebuild already failed to fix this recently on this channel. Fail
+          // fast with the real explanation instead of spending minutes on a
+          // doomed rebuild at every single launch.
           throw new Error(problem)
         }
         progress('构建产物缺少插件所需的导出，正在尝试重新构建...')
         this.markExportRepairAttempted()
-        await this.buildAll(progress) // throws a message naming the export
-        return
+        try {
+          await this.buildAll(progress) // throws a message naming the export
+          return
+        } catch (err) {
+          // Rebuilding cannot help when the *source* dropped the export — that
+          // is an upstream breaking change, not a stale artifact. The fix is a
+          // different channel, and this is exactly the launch on which a user
+          // discovers their pinned prerelease has broken. Switching here is the
+          // difference between "self-healing" and "unlaunchable until someone
+          // edits a config file by hand".
+          if (!this.channelIsRisky()) throw err
+          log(
+            'launcher',
+            `ensureReady: export repair rebuild failed on risky channel: ${(err as Error).message.slice(0, 200)}`
+          )
+          if (await this.downgradeToSafeChannel(progress)) return
+          throw new Error(
+            `${problem}\n\n已尝试切换到推荐通道但未能恢复。可用 DSH_CHANNEL=${DEFAULT_CHANNEL} 环境变量启动，` +
+              `或直接查看恢复指引：${recoveryGuidePath()}`
+          )
+        }
       }
       progress('依赖与构建已就绪，无需重复安装/构建')
       return
@@ -1714,9 +1733,15 @@ export class RuntimeSource {
 
   private exportRepairRecentlyAttempted(): boolean {
     try {
-      const last = Number(readFileSync(this.exportRepairFile(), 'utf-8').trim())
+      const [rawTs, rawChannel] = readFileSync(this.exportRepairFile(), 'utf-8').trim().split(/\s+/)
+      const last = Number(rawTs)
       if (!Number.isFinite(last) || last <= 0) return false
-      return Date.now() - last < RuntimeSource.EXPORT_REPAIR_COOLDOWN_MS
+      if (Date.now() - last >= RuntimeSource.EXPORT_REPAIR_COOLDOWN_MS) return false
+      // Switching channels *is* a repair, so it earns a fresh attempt. Without
+      // this a user escaping a broken prerelease via DSH_CHANNEL or the menu
+      // would be blocked by the old channel's cooldown for a full day, with no
+      // way to make the app retry.
+      return (rawChannel ?? '') === this.channel()
     } catch {
       return false
     }
@@ -1725,7 +1750,7 @@ export class RuntimeSource {
   private markExportRepairAttempted(): void {
     try {
       mkdirSync(dirname(this.exportRepairFile()), { recursive: true })
-      writeFileSync(this.exportRepairFile(), String(Date.now()), 'utf-8')
+      writeFileSync(this.exportRepairFile(), `${Date.now()} ${this.channel()}`, 'utf-8')
     } catch {
       /* best-effort */
     }
