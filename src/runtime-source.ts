@@ -901,8 +901,21 @@ export class RuntimeSource {
    * Exports known to be required by popular third-party plugins, keyed by the
    * built ESM entry of the workspace package that is supposed to provide them.
    *
+   * Sourced by scanning installed plugins for named imports out of
+   * `@deepseek-ai/*` — this is the complete set as of dsh 0.1.1-rc.2, covering
+   * dshmarket, dsh-config-manager and dsh-win32. To refresh it:
+   *
+   *   grep -rhoE "import\\s*\\{[^}]*\\}\\s*from\\s*['\"]@deepseek-ai/[a-z0-9-]+['\"]" \
+   *     ~/.dsh/profiles/web/node_modules --include="*.js" --include="*.mjs"
+   *
    * ONLY add entries verified against a real build. A wrong entry would roll
-   * the user back to an older version for no reason.
+   * the user back to an older version for no reason — which is the failure
+   * this list exists to prevent, not one to introduce. Every export below was
+   * confirmed present in the rc.2 build before being added.
+   *
+   * A missing package is not an error: entries whose file does not exist in
+   * the checked-out revision are skipped, so a package upstream splits or
+   * renames does not turn into a false alarm.
    */
   private static readonly CRITICAL_EXPORTS: ReadonlyArray<{
     pkg: string
@@ -914,6 +927,26 @@ export class RuntimeSource {
       pkg: '@deepseek-ai/dsh-settings',
       rel: join('packages', 'settings', 'settings', 'lib', 'index.js'),
       exports: ['settingsNamespace', 'installSettingsSection'],
+    },
+    {
+      pkg: '@deepseek-ai/dsh-tools',
+      rel: join('packages', 'core', 'tools', 'lib', 'index.js'),
+      exports: ['defineTool'],
+    },
+    {
+      pkg: '@deepseek-ai/dsh-credentials',
+      rel: join('packages', 'credentials', 'credentials', 'lib', 'index.js'),
+      exports: ['credentialRef'],
+    },
+    {
+      pkg: '@deepseek-ai/dsh-home-paths',
+      rel: join('packages', 'util', 'home-paths', 'lib', 'index.js'),
+      exports: ['dshHomePath', 'resolveDshHome'],
+    },
+    {
+      pkg: '@deepseek-ai/dsh-fs-sandbox',
+      rel: join('packages', 'fs', 'fs-sandbox', 'lib', 'index.js'),
+      exports: ['SandboxedFileSystem'],
     },
   ]
 
