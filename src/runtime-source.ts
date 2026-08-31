@@ -821,7 +821,9 @@ export class RuntimeSource {
     for (const parts of RuntimeSource.CLIENT_BUNDLE_CANDIDATES) {
       if (existsSync(join(this.dir, ...parts))) {
         // Frontend is built — only trust it when the backend is built too.
-        return this.hasMissingBackendArtifacts()
+        return (
+          this.hasMissingBackendArtifacts() || this.hasMissingClientArtifacts()
+        )
       }
     }
     return true
@@ -849,6 +851,74 @@ export class RuntimeSource {
         `needsBuild: backend artifact missing while frontend is built: ${entry.rel}`
       )
       return true
+    }
+    return false
+  }
+
+  /**
+   * True when a workspace package declares a client-face build ("dsh.client")
+   * but its lib/index.js has not been emitted yet.
+   *
+   * In deepseek-harness >= rc.2 the build pipeline is two-pass:
+   *   1. tsc -b tsconfig.host.json + tsdown --env.DSH_BUILD_FACE host
+   *   2. tsc -b tsconfig.client.json + tsdown --env.DSH_BUILD_FACE client
+   *
+   * hasMissingBackendArtifacts() only checks pass-1 (host) outputs. If pass-2
+   * was never run or failed partway through, the workspace looks "built" to that
+   * check but crashes at runtime with ERR_MODULE_NOT_FOUND when cordis tries to
+   * dynamically import a client UI package.
+   *
+   * This scan auto-discovers every client-face package by reading its
+   * package.json — no hardcoded list to keep in sync with upstream.
+   */
+  private hasMissingClientArtifacts(): boolean {
+    const groups = ['packages', 'apps', 'vendor']
+    for (const group of groups) {
+      const groupDir = join(this.dir, group)
+      if (!existsSync(groupDir)) continue
+      for (const pkg of readdirSync(groupDir, { withFileTypes: true })) {
+        if (!pkg.isDirectory()) continue
+        if (pkg.name.startsWith('.') || pkg.name === 'node_modules') continue
+        const pkgDir = join(groupDir, pkg.name)
+        // Handle two-level layout: packages/<group>/<pkg>/
+        // Also handle single-level: vendor/<pkg>/
+        const candidates = [pkgDir]
+        try {
+          for (const sub of readdirSync(pkgDir, { withFileTypes: true })) {
+            if (
+              sub.isDirectory() &&
+              sub.name !== 'node_modules' &&
+              !sub.name.startsWith('.')
+            ) {
+              candidates.push(join(pkgDir, sub.name))
+            }
+          }
+        } catch {
+          // Not readable — skip
+        }
+        for (const candidate of candidates) {
+          const manifest = join(candidate, 'package.json')
+          if (!existsSync(manifest)) continue
+          let parsed: Record<string, unknown>
+          try {
+            parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+          } catch {
+            continue
+          }
+          // Only check packages that declare a client build face.
+          const dsh = parsed.dsh as Record<string, unknown> | undefined
+          if (!dsh?.client) continue
+          // Client-face package exists but has no lib/ output → needs rebuild.
+          const libIndex = join(candidate, 'lib', 'index.js')
+          if (!existsSync(libIndex)) {
+            log(
+              'launcher',
+              `needsBuild: client artifact missing: ${relative(this.dir, libIndex)}`
+            )
+            return true
+          }
+        }
+      }
     }
     return false
   }
