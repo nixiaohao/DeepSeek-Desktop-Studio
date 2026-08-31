@@ -814,19 +814,25 @@ export class RuntimeSource {
         } catch (err) {
           // Rebuilding cannot help when the *source* dropped the export — that
           // is an upstream breaking change, not a stale artifact. The fix is a
-          // different channel, and this is exactly the launch on which a user
-          // discovers their pinned prerelease has broken. Switching here is the
-          // difference between "self-healing" and "unlaunchable until someone
-          // edits a config file by hand".
-          if (!this.channelIsRisky()) throw err
+          // different *revision*, and this is the launch on which a user
+          // discovers their workspace has drifted onto one that cannot work.
+          //
+          // Note this is not limited to the prerelease channels. The common
+          // case is the opposite: the channel says `next` but the working tree
+          // is still sitting on an alpha commit — because the update that would
+          // have moved it was throttled, or had failed and been rolled back.
+          // Rebuilding that tree fails no matter how many times it is retried,
+          // so moving to the channel's own commit is the only repair. Doing it
+          // here is what makes this self-healing rather than "unlaunchable
+          // until someone edits a config file by hand".
           log(
             'launcher',
-            `ensureReady: export repair rebuild failed on risky channel: ${(err as Error).message.slice(0, 200)}`
+            `ensureReady: export repair rebuild failed (channel=${this.channel()}): ${(err as Error).message.slice(0, 200)}`
           )
           if (await this.downgradeToSafeChannel(progress)) return
           throw new Error(
-            `${problem}\n\n已尝试切换到推荐通道但未能恢复。可用 DSH_CHANNEL=${DEFAULT_CHANNEL} 环境变量启动，` +
-              `或直接查看恢复指引：${recoveryGuidePath()}`
+            `${problem}\n\n已尝试切换到推荐通道（${DEFAULT_CHANNEL}）但未能恢复。` +
+              `可用 DSH_CHANNEL=${DEFAULT_CHANNEL} 环境变量启动，或直接查看恢复指引：${recoveryGuidePath()}`
           )
         }
       }
