@@ -1725,6 +1725,51 @@ export class RuntimeSource {
     return pruned
   }
 
+  /**
+   * Remove ALL build artifacts (lib/, dist/) from every package slot.
+   *
+   * Unlike pruneOrphanedArtifacts — which only cleans packages that were
+   * *deleted* upstream — this removes artifacts from EVERY package regardless
+   * of whether it still exists.
+   *
+   * This is necessary after a channel switch (git reset --hard to a different
+   * version) because:
+   *
+   * 1. The old version's lib/ may import packages that the new version does not
+   *    declare as dependencies (e.g. alpha.2's dsh-tools/lib imported
+   *    @deepseek-ai/dsh-util-values, but rc.2's source does not). tsdown's
+   *    incremental build sees "source unchanged" (comparing against its own cache)
+   *    and skips those packages, leaving stale .js that reference nonexistent
+   *    modules → ERR_MODULE_NOT_FOUND at runtime.
+   *
+   * 2. pnpm may restructure node_modules between versions, so even if the
+   *    source is identical, the resolved module paths can differ.
+   *
+   * The cost is a full rebuild of all packages (~30s for backend, ~2min for
+   *    frontend), but this only runs after an actual channel switch, not on
+   *    every launch.
+   */
+  cleanAllBuildArtifacts(progress?: ProgressFn): number {
+    let removed = 0
+    for (const slot of this.packageSlots()) {
+      for (const artifact of RuntimeSource.ARTIFACT_DIRS) {
+        const target = join(slot, artifact)
+        if (!existsSync(target)) continue
+        try {
+          rmSync(target, { recursive: true, force: true })
+          removed++
+        } catch (err) {
+          log('launcher', `cleanAllBuildArtifacts: failed on ${target}: ${(err as Error).message.slice(0, 160)}`)
+        }
+      }
+    }
+    if (removed > 0) {
+      log('launcher', `cleanAllBuildArtifacts: removed ${String(removed)} artifact dirs`)
+      progress?.(`已清理全部构建产物（${String(removed)} 个目录），准备全量重建...`)
+    }
+    return removed
+  }
+
   // ── Known-bad update marker ──
 
   /** Records a remote commit that could not be built, so we stop retrying it. */
@@ -2050,9 +2095,14 @@ export class RuntimeSource {
     if (this.lockHashChanged()) {
       await this.installDeps(progress, oldHead)
     }
-    // Packages upstream deleted leave gitignored build output behind; without
-    // this the new build consumes stale .js from them and fails (MISSING_EXPORT).
-    this.pruneOrphanedArtifacts(progress)
+    // After a git reset --hard (especially a channel switch), stale build
+    // artifacts from the old version can reference modules the new version does
+    // not provide — e.g. alpha.2's dsh-tools/lib imported @deepseek-ai/dsh-util-values
+    // which rc.2 does not declare as a dependency. tsdown's incremental build
+    // skips "unchanged" packages, leaving these broken .js in place →
+    // ERR_MODULE_NOT_FOUND at runtime. A full artifact clean forces tsdown to
+    // rebuild everything from the new source.
+    this.cleanAllBuildArtifacts(progress)
     // Code changed → rebuild backend + frontend so the web UI matches.
     try {
       await this.buildAll(progress)
@@ -2113,14 +2163,17 @@ export class RuntimeSource {
       log('launcher', `downgradeToSafeChannel: reset failed: ${(err as Error).message.slice(0, 200)}`)
       return false
     }
-    this.pruneOrphanedArtifacts(progress)
+    // Channel switch → source code changed for every package. Clean ALL
+    // build artifacts so tsdown cannot reuse stale .js from the old version
+    // (which may import modules the new version does not provide).
+    this.cleanAllBuildArtifacts(progress)
     try {
       await this.buildAll(progress)
     } catch {
       progress('切换后构建仍失败，正在重新安装依赖...')
       try {
         await this.installDeps(progress)
-        this.pruneOrphanedArtifacts(progress)
+        this.cleanAllBuildArtifacts(progress)
         await this.buildAll(progress)
       } catch (err) {
         log('launcher', `downgradeToSafeChannel: rebuild failed: ${(err as Error).message.slice(0, 200)}`)
@@ -2167,15 +2220,16 @@ export class RuntimeSource {
         log('launcher', `rollbackAfterBuildFailure: reset failed: ${(err as Error).message.slice(0, 200)}`)
       }
     }
-    // The old revision can have orphans of its own (packages it removed).
-    this.pruneOrphanedArtifacts(progress)
+    // The old revision can have orphans of its own (packages it removed),
+    // and the failed build may have left partial artifacts from the new version.
+    this.cleanAllBuildArtifacts(progress)
 
     try {
       await this.buildAll(progress)
     } catch {
       progress('回退后构建仍失败，正在按旧版本重新安装依赖...')
       await this.installDeps(progress)
-      this.pruneOrphanedArtifacts(progress)
+      this.cleanAllBuildArtifacts(progress)
       await this.buildAll(progress)
     }
 
