@@ -11,7 +11,13 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import { Launcher } from './launcher.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
-import { loadPreferences, savePreferences } from './preferences.js'
+import {
+  loadPreferences,
+  savePreferences,
+  recoveryGuidePath,
+  hasRecoveryGuide,
+} from './preferences.js'
+import { channelDef, type ChannelId } from './channels.js'
 import { createTray, destroyTray } from './tray.js'
 import { setupMenu } from './menu.js'
 import { resolveWorkspace } from './workspace.js'
@@ -379,6 +385,115 @@ async function installMarketWithWindow(): Promise<void> {
   }
 }
 
+// ── Release channel ──
+
+/**
+ * Show a message box, parented to the main window when it exists.
+ * Menu items are reachable while the splash is still up, so the unparented
+ * overload has to stay a supported path.
+ */
+function showMessage(opts: Electron.MessageBoxSyncOptions): number {
+  return mainWindow ? dialog.showMessageBoxSync(mainWindow, opts) : dialog.showMessageBoxSync(opts)
+}
+
+/**
+ * The warning shown before switching to a prerelease channel.
+ *
+ * Deliberately explicit about the failure mode that actually bit users, and
+ * about every way back: a warning that does not say how to undo the thing it
+ * warns about just creates a support request.
+ */
+function channelRiskDetail(id: ChannelId): string {
+  const def = channelDef(id)
+  return [
+    `【这个通道可能带来什么问题】`,
+    `· 上游可能删除或重命名第三方插件依赖的接口。`,
+    `  已发生过：0.1.2-alpha.2 移除了 settingsNamespace 与 installSettingsSection，`,
+    `  导致 dshmarket、dsh-config-manager 等插件在加载阶段直接失败。`,
+    `· 多数插件的 peerDependencies 只声明支持 rc 通道，不覆盖 ${def.id}。`,
+    `· 构建可能返回成功，但启动加载插件时崩溃。`,
+    ``,
+    `【自动保护】`,
+    `检测到该通道的版本无法构建、或构建产物缺少插件所需的导出时，`,
+    `本程序会自动切回 next 通道并重新构建，通常无需你手动干预。`,
+    ``,
+    `【万一仍然启动不了，以下三种方式任选其一即可修复】`,
+    `1. 菜单 → 更新 → 更新通道 → 选择「next（推荐）」，重启应用。`,
+    `2. 设置环境变量 DSH_CHANNEL=next 后，从同一个终端窗口启动应用（此方式优先级最高）。`,
+    `3. 编辑 ${recoveryGuidePath().replace(/RECOVERY\.md$/, 'studio-prefs.json')}，`,
+    `   把 "channel" 改为 "next"，保存后重启。`,
+    ``,
+    `完整说明会写入 ${recoveryGuidePath()}，即使应用打不开也能查看。`,
+  ].join('\n')
+}
+
+/** Menu → 更新 → 更新通道. Persists the choice and offers an immediate restart. */
+function handleSelectChannel(id: ChannelId): void {
+  const def = channelDef(id)
+  const prefs = loadPreferences()
+
+  if (def.risky && prefs.channelRiskAck?.[id] !== 'ack') {
+    const choice = showMessage({
+      type: 'warning',
+      title: `切换到 ${def.label} 通道`,
+      message: `确定要切换到 ${def.label} 通道吗？`,
+      detail: channelRiskDetail(id),
+      buttons: ['继续切换', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+    })
+    if (choice !== 0) return
+    savePreferences({ channelRiskAck: { ...(prefs.channelRiskAck ?? {}), [id]: 'ack' } })
+  }
+
+  // Route through RuntimeSource so the on-disk recovery guide is refreshed
+  // too; fall back to raw persistence before the launcher exists.
+  const src = launcher?.runtimeSrc
+  if (src) {
+    src.setChannel(id)
+  } else {
+    savePreferences({ channel: id })
+  }
+  log('launcher', `channel switched to ${id} via menu`)
+
+  const choice = showMessage({
+    type: 'info',
+    title: '更新通道已切换',
+    message: `已切换到 ${def.label} 通道。`,
+    detail: def.risky
+      ? `重启应用后会下载并构建该通道的最新版本。\n\n若启动异常，恢复指引见：\n${recoveryGuidePath()}`
+      : `重启应用后会切换到该通道的最新版本。`,
+    buttons: ['立即重启', '稍后重启'],
+    defaultId: 0,
+    cancelId: 1,
+  })
+  if (choice === 0) relaunchApp()
+}
+
+/** Menu → 更新 → 打开恢复指引. */
+function handleShowRecovery(): void {
+  const guide = recoveryGuidePath()
+  if (hasRecoveryGuide()) {
+    void shell.openPath(guide)
+    return
+  }
+  showMessage({
+    type: 'info',
+    title: '更新通道',
+    message: '当前使用的是安全通道（stable / next），没有需要恢复的问题。',
+    detail:
+      `更新通道决定跟随上游的哪个发布通道，默认 next（rc 预发布）。\n` +
+      `\n` +
+      `如果需要切换，有三种方式：\n` +
+      `1. 菜单 → 更新 → 更新通道（应用能启动时）\n` +
+      `2. 设置环境变量 DSH_CHANNEL（优先级最高）\n` +
+      `3. 编辑 ${guide.replace(/RECOVERY\.md$/, 'studio-prefs.json')} 里的 "channel" 字段\n` +
+      `\n` +
+      `切换到尝鲜通道（canary / alpha）后，本文件会被自动创建。`,
+    buttons: ['确定'],
+  })
+}
+
 // ── About dialog (custom: source attribution + clickable official site) ──
 
 const OFFICIAL_SITE = 'https://www.guoxiantech.com'
@@ -489,6 +604,12 @@ app.whenReady().then(async () => {
     },
     () => {
       showAboutDialog()
+    },
+    (id: ChannelId) => {
+      handleSelectChannel(id)
+    },
+    () => {
+      handleShowRecovery()
     }
   )
   setupIPC()

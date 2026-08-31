@@ -36,6 +36,21 @@ import {
   type ToolInfo,
 } from './env-detector.js'
 import { appendChildOutput, getLogDir, isDebug, log, type LogName } from './logging.js'
+import {
+  CHANNEL_ENV_VAR,
+  DEFAULT_CHANNEL,
+  channelDef,
+  normalizeChannel,
+  selectChannelTag,
+  type ChannelId,
+  type ChannelSelection,
+} from './channels.js'
+import {
+  loadPreferences,
+  savePreferences,
+  writeRecoveryGuide,
+  recoveryGuidePath,
+} from './preferences.js'
 
 const REPO_URL = 'https://github.com/deepseek-ai/deepseek-harness.git'
 const BRANCH = 'master'
@@ -81,6 +96,27 @@ export interface UpdateResult {
   skipped: boolean
   reason?: string
 }
+
+/**
+ * A concrete revision to check out, resolved from a release channel.
+ *
+ * `sha` comes straight from `git ls-remote`, so "is there an update?" is
+ * answered without downloading the objects first.
+ */
+export interface ChannelTarget {
+  selection: ChannelSelection
+  /** Commit the channel's tag points at. */
+  sha: string
+}
+
+/**
+ * How long `git ls-remote --tags` results are reused.
+ *
+ * Listing remote refs is the only network call needed to decide whether an
+ * update exists; a launch that also applies one re-lists with force=true so
+ * it never acts on a stale answer.
+ */
+const TAG_LIST_CACHE_MS = 60 * 1000
 
 /**
  * Collect the names a built ESM file exports, by parsing its export
@@ -176,6 +212,8 @@ export class RuntimeSource {
   readonly dir: string
   private git: ToolInfo | null = null
   private gitChecked = false
+  /** Cached `git ls-remote --tags` output: [fullRef, sha] pairs. */
+  private remoteTags: { at: number; entries: Array<{ ref: string; sha: string }> } | null = null
 
   constructor(dir: string) {
     this.dir = dir
@@ -1446,6 +1484,29 @@ export class RuntimeSource {
     if (!this.exists) return false
     const git = this.getGit()
     if (git) {
+      // ── Channel-pinned path ──
+      // `ls-remote --tags` answers "is there an update?" without downloading
+      // objects, and pins the workspace to a *released* version instead of
+      // whatever master's tip happens to be — master carries alpha tags that
+      // third-party plugins do not support.
+      const target = this.resolveChannelTarget({ force: true })
+      if (target) {
+        this.touchUpdateCheck()
+        const failed = this.readFailedCommit()
+        if (target.sha && this.sameCommit(target.sha, failed)) {
+          log(
+            'launcher',
+            `checkUpdate: skipping ${target.selection.tag} (${target.sha.slice(0, 7)}) — recorded as unbuildable`
+          )
+          return false
+        }
+        const head = this.currentCommit()
+        if (this.sameCommit(head, target.sha)) return false
+        return true
+      }
+      // No channel resolution (offline, or upstream publishes no tags):
+      // fall through to the previous branch-tracking behaviour rather than
+      // treating "cannot resolve a channel" as "cannot start".
       const remote = this.remoteName()
       try {
         this.removeStaleLocks()
@@ -1470,7 +1531,10 @@ export class RuntimeSource {
         // launch, so skip it until upstream publishes a different commit.
         const head = this.remoteHead()
         const failed = this.readFailedCommit()
-        if (head && head === failed) {
+        // remoteHead() is a full 40-char hash while the recorded failure is
+        // the 7-char short form, so this has to be a length-tolerant compare —
+        // otherwise a known-bad commit is offered again on every launch.
+        if (this.sameCommit(head, failed)) {
           log('launcher', `checkUpdate: skipping known-unbuildable commit ${head.slice(0, 7)}`)
           return false
         }
@@ -1512,6 +1576,16 @@ export class RuntimeSource {
     // ZIP-initialized repos may have an empty local branch even after gitify.
     // Attach to the fetched remote branch so build scripts can resolve HEAD.
     this.attachToRemoteBranch()
+
+    // Announce a prerelease channel before touching the network, so that a
+    // user who later hits a failure already knows what they opted into and
+    // that the app repairs itself. No extra network call: this reads config.
+    if (this.channelIsRisky()) {
+      const def = channelDef(this.channel())
+      progress(`当前更新通道：${def.label}（可能与第三方插件不兼容）`)
+      progress(`若启动失败会自动切回 next 通道；修复说明见 ${recoveryGuidePath()}`)
+    }
+
     const git = this.getGit()
     if (!git) {
       progress('未检测到 git，已跳过自动更新（使用现有代码启动）')
@@ -1689,7 +1763,171 @@ export class RuntimeSource {
     } catch { /* best-effort */ }
   }
 
-  /** Full hash currently pointed at by <remote>/<branch>, or '' when unknown. */
+  // ── Release channel ──
+
+  /**
+   * The channel this workspace follows.
+   *
+   * Precedence: `DSH_CHANNEL` env var > persisted preference > `next`.
+   * The env var exists specifically so a user whose app will not start can
+   * escape a broken prerelease without needing the UI to work — documented in
+   * ~/.dsh/RECOVERY.md. An empty or unrecognised value falls back to the
+   * preference rather than silently pinning to something unexpected.
+   */
+  channel(): ChannelId {
+    const raw = process.env[CHANNEL_ENV_VAR]
+    if (raw && raw.trim()) return normalizeChannel(raw.trim())
+    return normalizeChannel(loadPreferences().channel ?? DEFAULT_CHANNEL)
+  }
+
+  /** True when the channel may break third-party plugins. */
+  channelIsRisky(): boolean {
+    return channelDef(this.channel()).risky
+  }
+
+  /**
+   * Persist a channel choice and refresh the on-disk recovery guide.
+   * Best-effort: failing to write a help file must never block a switch.
+   */
+  setChannel(id: ChannelId): void {
+    try {
+      savePreferences({ channel: id })
+    } catch (err) {
+      log('launcher', `setChannel: could not persist ${id}: ${(err as Error).message.slice(0, 160)}`)
+    }
+    const risky = channelDef(id).risky
+    const guide = writeRecoveryGuide(id, { logDir: getLogDir(), risky })
+    log('launcher', `channel set to ${id}${guide ? ` (recovery guide: ${guide})` : ''}`)
+  }
+
+  /**
+   * List remote tags via `git ls-remote --tags`.
+   *
+   * Returns null when git or the network is unavailable, or when upstream
+   * publishes no tags at all. Callers treat null as "cannot resolve a
+   * channel" and fall back to the previous branch-tracking behaviour — this
+   * must never become a new way to fail startup.
+   */
+  private listRemoteTags(force = false): Array<{ ref: string; sha: string }> | null {
+    const git = this.getGit()
+    if (!git) return null
+    if (!force && this.remoteTags && Date.now() - this.remoteTags.at < TAG_LIST_CACHE_MS) {
+      return this.remoteTags.entries
+    }
+    try {
+      this.removeStaleLocks()
+      const out = execFileSync(
+        git.path,
+        ['-C', this.dir, 'ls-remote', '--tags', this.remoteName()],
+        {
+          encoding: 'utf-8',
+          timeout: FETCH_TIMEOUT_MS,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          windowsHide: true,
+        }
+      )
+      // `ls-remote --tags` prints an annotated tag twice:
+      //   88fa263…  refs/tags/dsh-v0.1.1-rc.2      ← the tag OBJECT
+      //   235ed1a…  refs/tags/dsh-v0.1.1-rc.2^{}   ← the commit it points at
+      // Only the commit is comparable to HEAD. Taking the first line blind
+      // would make every launch think a new version exists (tag sha never
+      // equals HEAD sha) and trigger a needless rebuild every single time.
+      const byRef = new Map<string, string>()
+      for (const line of out.split('\n')) {
+        const m = /^([0-9a-f]{7,40})\s+(\S+)$/.exec(line.trim())
+        if (!m) continue
+        const sha = m[1]
+        const deref = m[2].endsWith('^{}')
+        const ref = deref ? m[2].slice(0, -3) : m[2]
+        if (!ref.startsWith('refs/tags/')) continue
+        // A dereferenced line always wins over the tag-object line.
+        if (deref || !byRef.has(ref)) byRef.set(ref, sha)
+      }
+      const entries = [...byRef].map(([ref, sha]) => ({ ref, sha }))
+      if (entries.length === 0) return null
+      this.remoteTags = { at: Date.now(), entries }
+      return entries
+    } catch (err) {
+      log('launcher', `listRemoteTags failed: ${(err as Error).message.slice(0, 160)}`)
+      return null
+    }
+  }
+
+  /**
+   * Resolve a channel to the concrete revision to check out.
+   *
+   * `sha` comes from the ls-remote listing, so an update can be detected
+   * without fetching objects first. Returns null when unresolvable.
+   */
+  private resolveChannelTarget(
+    opts: { force?: boolean; channel?: ChannelId } = {}
+  ): ChannelTarget | null {
+    const entries = this.listRemoteTags(opts.force ?? false)
+    if (!entries) return null
+    const requested = opts.channel ?? this.channel()
+    const selection = selectChannelTag(requested, entries.map((e) => e.ref))
+    if (!selection) return null
+    const hit = entries.find((e) => e.ref === `refs/tags/${selection.tag}`)
+    if (!hit) return null
+    return { selection, sha: hit.sha }
+  }
+
+  /**
+   * Make a channel's tag available locally so it can be checked out.
+   *
+   * The workspace is a `--depth 1` clone, so tags have to be fetched
+   * explicitly. `+refs/tags/x:refs/tags/x` forces the local tag to move when
+   * upstream re-tags a version.
+   */
+  private ensureTagFetched(target: ChannelTarget, progress?: ProgressFn): boolean {
+    const git = this.getGit()
+    if (!git) return false
+    const tag = target.selection.tag
+    try {
+      // `^{commit}` dereferences an annotated tag; a plain `refs/tags/x`
+      // rev-parse would yield the tag object's sha, which never equals the
+      // commit sha we compare against — the fetch would then run every launch.
+      const have = this.gitSync(['rev-parse', '--verify', '--quiet', `refs/tags/${tag}^{commit}`], {
+        timeoutMs: 15_000,
+      }).trim()
+      if (have === target.sha) return true
+    } catch {
+      /* tag not present locally yet */
+    }
+    try {
+      this.removeStaleLocks()
+      this.gitSync(
+        ['fetch', '--depth', '1', this.remoteName(), `+refs/tags/${tag}:refs/tags/${tag}`],
+        { timeoutMs: FETCH_TIMEOUT_MS }
+      )
+      return true
+    } catch (err) {
+      log('launcher', `ensureTagFetched(${tag}) failed: ${(err as Error).message.slice(0, 200)}`)
+      progress?.(`获取标签 ${tag} 失败`)
+      return false
+    }
+  }
+
+  /**
+   * Compare two git hashes that may be abbreviated to different lengths.
+   *
+   * `currentCommit()` returns a 7-char short hash (and normalises an env-var
+   * fallback to 7 chars) while `ls-remote` yields the full 40. Comparing those
+   * with `===` makes every launch look like there is an update, which would
+   * trigger a full rebuild on every single start.
+   */
+  private sameCommit(a: string, b: string): boolean {
+    if (!a || !b) return false
+    if (a === 'unknown' || b === 'unknown') return false
+    const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a]
+    return longer.startsWith(shorter)
+  }
+
+  /**
+   * Full hash currently pointed at by <remote>/<branch>, or '' when unknown.
+   * Only used by the branch-tracking fallback; the channel path compares
+   * against the resolved tag's sha instead.
+   */
   private remoteHead(): string {
     const git = this.getGit()
     if (!git) return ''
@@ -1698,6 +1936,15 @@ export class RuntimeSource {
     } catch {
       return ''
     }
+  }
+
+  /** Short, human-readable description of the active channel for progress lines. */
+  private channelLabel(target: ChannelTarget | null): string {
+    const id = target?.selection.channel ?? this.channel()
+    const def = channelDef(id)
+    const version = target?.selection.version
+    const base = version ? `${def.label} ${version}` : def.label
+    return target?.selection.degraded ? `${base}（该通道暂无对应版本，已取可用版本）` : base
   }
 
   /**
@@ -1711,7 +1958,16 @@ export class RuntimeSource {
     const git = this.getGit()
 
     const remote = this.remoteName()
-    if (git) {
+    // Prefer the pinned channel tag. Only fall back to the branch tip when no
+    // channel could be resolved — master's tip routinely carries alpha tags
+    // that the plugin ecosystem does not support.
+    const target = this.resolveChannelTarget()
+    if (git && target && this.ensureTagFetched(target, progress)) {
+      try { this.gitSync(['stash'], { timeoutMs: 30_000 }) } catch { /* nothing to stash */ }
+      progress(`更新源码到 ${this.channelLabel(target)}...`)
+      this.gitSync(['reset', '--hard', target.sha], { timeoutMs: 60_000 })
+      try { this.gitSync(['stash', 'pop'], { timeoutMs: 30_000 }) } catch { /* no stash */ }
+    } else if (git) {
       try { this.gitSync(['stash'], { timeoutMs: 30_000 }) } catch { /* nothing to stash */ }
       progress('更新源码...')
       this.gitSync(['reset', '--hard', `${remote}/${BRANCH}`], { timeoutMs: 60_000 })
@@ -1763,13 +2019,79 @@ export class RuntimeSource {
    * Throws when the rollback itself cannot be built; that is a real failure
    * the user must see.
    */
+  /**
+   * Escape hatch for a risky channel that cannot be built: switch to the
+   * recommended channel, check it out and rebuild.
+   *
+   * Persisting the switch matters more than the rebuild succeeding — once the
+   * preference says `next`, every later launch resolves to the rc line and the
+   * broken prerelease is never offered again. That is what keeps a bad alpha
+   * from needing a manual rescue: the app repairs its own configuration.
+   *
+   * Returns false when any step fails, so the caller can still try the
+   * conventional rollback to the previously working commit.
+   */
+  private async downgradeToSafeChannel(progress: ProgressFn): Promise<boolean> {
+    const target = this.resolveChannelTarget({ force: true, channel: DEFAULT_CHANNEL })
+    const git = this.getGit()
+    if (!target || !git) return false
+
+    progress(`尝鲜通道版本无法构建，正在自动切换到 ${this.channelLabel(target)}...`)
+    // Persist first: even if the rebuild below fails, the next launch starts
+    // from the safe channel instead of retrying the broken one.
+    this.setChannel(DEFAULT_CHANNEL)
+
+    try {
+      this.removeStaleLocks()
+      if (!this.ensureTagFetched(target, progress)) return false
+      this.gitSync(['reset', '--hard', target.sha], { timeoutMs: 60_000 })
+    } catch (err) {
+      log('launcher', `downgradeToSafeChannel: reset failed: ${(err as Error).message.slice(0, 200)}`)
+      return false
+    }
+    this.pruneOrphanedArtifacts(progress)
+    try {
+      await this.buildAll(progress)
+    } catch {
+      progress('切换后构建仍失败，正在重新安装依赖...')
+      try {
+        await this.installDeps(progress)
+        this.pruneOrphanedArtifacts(progress)
+        await this.buildAll(progress)
+      } catch (err) {
+        log('launcher', `downgradeToSafeChannel: rebuild failed: ${(err as Error).message.slice(0, 200)}`)
+        return false
+      }
+    }
+    progress(`已自动切换到 ${this.channelLabel(target)}（本次更新已跳过）`)
+    return true
+  }
+
   private async rollbackAfterBuildFailure(
     oldHead: string,
     progress: ProgressFn,
     buildError: Error
   ): Promise<void> {
-    const bad = this.remoteHead()
+    // HEAD is already the commit that failed to build (applyUpdate resets
+    // before building), which is more accurate than the branch tip when the
+    // workspace is pinned to a tag.
+    const bad = this.currentCommit()
     this.writeFailedCommit(bad)
+
+    // A prerelease channel that cannot build is a *channel* problem, not a
+    // one-off bad commit: rolling back to the previous revision of the same
+    // alpha line would fail again on the next launch. Drop to the recommended
+    // channel instead.
+    if (this.channelIsRisky()) {
+      if (await this.downgradeToSafeChannel(progress)) {
+        log(
+          'launcher',
+          `rollbackAfterBuildFailure: auto-downgraded off risky channel, skipped ${bad.slice(0, 7)}`
+        )
+        return
+      }
+      log('launcher', 'rollbackAfterBuildFailure: channel downgrade failed — falling back to previous commit')
+    }
 
     const git = this.getGit()
     if (git && oldHead && oldHead !== 'unknown') {

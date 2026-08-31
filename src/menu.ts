@@ -4,18 +4,28 @@
  */
 import { app, Menu, shell, type MenuItemConstructorOptions } from 'electron'
 import { relaunchApp } from './relaunch.js'
+import { CHANNELS, normalizeChannel, type ChannelId } from './channels.js'
+import { loadPreferences } from './preferences.js'
 
 /**
  * Build and set the application menu.
  * @param onCheckUpdate called when the user clicks "Check for updates"
  * @param onInstallPluginMarket called when the user clicks "Install plugin market"
  * @param onShowAbout called when the user clicks "About" (custom dialog)
+ * @param onSelectChannel called with the chosen channel id from 更新通道
+ * @param onShowRecovery called when the user clicks 打开恢复指引
  */
 export function setupMenu(
   onCheckUpdate: () => void,
   onInstallPluginMarket: () => void,
-  onShowAbout: () => void
+  onShowAbout: () => void,
+  onSelectChannel: (id: ChannelId) => void,
+  onShowRecovery: () => void
 ): void {
+  // Read at build time; switching a channel relaunches the app, which rebuilds
+  // the menu, so the radio mark stays in sync.
+  const currentChannel = normalizeChannel(loadPreferences().channel)
+
   const template: MenuItemConstructorOptions[] = [
     {
       label: app.name,
@@ -67,6 +77,25 @@ export function setupMenu(
           label: '检查更新',
           click: () => onCheckUpdate(),
         },
+        { type: 'separator' },
+        {
+          label: '更新通道',
+          submenu: [
+            { label: '决定跟随上游哪个发布通道（默认 next）', enabled: false },
+            { type: 'separator' },
+            ...CHANNELS.map<MenuItemConstructorOptions>((c) => ({
+              label: c.label,
+              type: 'radio',
+              checked: currentChannel === c.id,
+              click: () => onSelectChannel(c.id),
+            })),
+          ],
+        },
+        {
+          label: '打开恢复指引',
+          click: () => onShowRecovery(),
+        },
+        { type: 'separator' },
         {
           label: '重启应用',
           click: () => relaunchApp(),
