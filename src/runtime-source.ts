@@ -23,6 +23,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
   chmodSync,
   rmSync,
@@ -923,6 +924,10 @@ export class RuntimeSource {
         // A plain `pnpm install` here would report "Already up to date" and
         // change nothing — see forceDependencyRelink.
         this.forceDependencyRelink()
+        // Deleting state markers is not enough: pnpm created empty directories
+        // during the killed install and still sees them as "present". Remove
+        // them so pnpm treats the packages as genuinely missing.
+        this.pruneEmptyLinks()
         await this.installDeps(progress)
         // Let a second failure propagate. At that point the dependencies are
         // known-good, so the problem is the build itself — which is what the
@@ -2311,6 +2316,80 @@ export class RuntimeSource {
   }
 
   // ── Dependencies ──
+
+  /**
+   * Remove empty dependency directories left by a killed pnpm install.
+   *
+   * When pnpm is interrupted (app closed, power loss, OOM killer), it leaves
+   * behind directories it has created but not yet filled — they exist on disk
+   * but contain zero files. Both `forceDependencyRelink` (which deletes pnpm's
+   * completion marker) AND a plain `pnpm install` are insufficient: pnpm sees
+   * the directory present in its virtual store / consumer node_modules and
+   * assumes the link is already satisfied, so it skips re-linking and the
+   * build dies with "Cannot find module" for a package that package.json
+   * plainly declares.
+   *
+   * This pass removes those empty directories so that the subsequent
+   * `pnpm install` treats them as genuinely missing and recreates the links.
+   * It only touches directories with exactly 0 entries — filled directories,
+   * symlinks into `.pnpm`, and non-node_modules paths are never disturbed.
+   *
+   * Scopes: root `node_modules` plus every workspace package's own
+   * `node_modules` (pnpm hoists dependencies into consumer packages too).
+   */
+  private pruneEmptyLinks(): number {
+    const nmDirs = [join(this.dir, 'node_modules')]
+    // Collect ALL node_modules directories under workspace roots.
+    // pnpm hoists dependencies into each consumer package's own node_modules,
+    // so empty links can appear at any depth:
+    //   packages/<group>/<pkg>/node_modules/<empty-dep>
+    //   apps/<app>/node_modules/<empty-dep>
+    //   vendor/<pkg>/node_modules/<empty-dep>
+    const workspaceRoots = ['packages', 'apps', 'vendor', 'examples', 'native']
+    const collectNm = (dir: string) => {
+      if (!existsSync(dir)) return
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const fullPath = join(dir, entry.name)
+        if (entry.name === 'node_modules') {
+          nmDirs.push(fullPath)
+        } else {
+          collectNm(fullPath) // recurse into subdirectories
+        }
+      }
+    }
+    for (const root of workspaceRoots) {
+      collectNm(join(this.dir, root))
+    }
+
+    let pruned = 0
+    for (const nmDir of nmDirs) {
+      try {
+        if (!existsSync(nmDir) || !statSync(nmDir).isDirectory()) continue
+        for (const entry of readdirSync(nmDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue
+          const fullPath = join(nmDir, entry.name)
+          // Only prune if truly empty (0 entries). A directory with even one
+          // file or subdirectory might be a valid partial install.
+          try {
+            const contents = readdirSync(fullPath)
+            if (contents.length === 0) {
+              rmSync(fullPath, { force: true, recursive: true })
+              pruned++
+            }
+          } catch {
+            // Permission error or race — skip
+          }
+        }
+      } catch {
+        // Skip unreadable directories
+      }
+    }
+    if (pruned > 0) {
+      log('launcher', `pruneEmptyLinks: removed ${pruned} empty dependency directories`)
+    }
+    return pruned
+  }
 
   /**
    * Make the next `pnpm install` actually re-link instead of short-circuiting.

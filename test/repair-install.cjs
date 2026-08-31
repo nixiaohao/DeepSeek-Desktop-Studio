@@ -112,6 +112,37 @@ function makeWorkspace(name, markers) {
   )
   check('the project lockfile survives', fs.existsSync(path.join(e.dir, 'pnpm-lock.yaml')), true)
 
+  console.log('\n=== F. Empty dependency directories are pruned ===')
+  const f = makeWorkspace('f', [])
+  // Simulate pnpm's empty directories in root node_modules
+  const emptyPkg1 = path.join(f.dir, 'node_modules', 'vitest')
+  const filledPkg = path.join(f.dir, 'node_modules', 'lodash')
+  fs.mkdirSync(emptyPkg1, { recursive: true })
+  fs.mkdirSync(filledPkg, { recursive: true })
+  fs.writeFileSync(path.join(filledPkg, 'package.json'), '{}\n', 'utf-8')
+  // Also simulate an empty dir inside a workspace package's node_modules
+  const pkgGroup = path.join(f.dir, 'packages', 'client')
+  const pkgNm = path.join(pkgGroup, 'runtime', 'node_modules')
+  fs.mkdirSync(pkgNm, { recursive: true })
+  const emptyPkg2 = path.join(pkgNm, 'react')
+  fs.mkdirSync(emptyPkg2, { recursive: true })
+
+  const pruned = f.src.pruneEmptyLinks()
+  check('pruned count includes root + workspace empty dirs', pruned >= 2, true)
+  check('empty root pkg removed', fs.existsSync(emptyPkg1), false)
+  check('empty workspace pkg removed', fs.existsSync(emptyPkg2), false)
+  check('filled pkg untouched', fs.existsSync(filledPkg), true)
+  check('filled pkg content intact', fs.existsSync(path.join(filledPkg, 'package.json')), true)
+
+  console.log('\n=== G. No empty dirs → zero pruned ===')
+  const g = makeWorkspace('g', [])
+  const ok = path.join(g.dir, 'node_modules', 'ok-pkg')
+  fs.mkdirSync(ok, { recursive: true })
+  fs.writeFileSync(path.join(ok, 'index.js'), '// ok\n', 'utf-8')
+  const gPruned = g.src.pruneEmptyLinks()
+  check('nothing pruned when all dirs have content', gPruned, 0)
+  check('ok package still exists', fs.existsSync(ok), true)
+
   fs.rmSync(ROOT, { recursive: true, force: true })
   console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'}: ${pass} passed, ${fail} failed`)
   process.exit(fail === 0 ? 0 : 1)
