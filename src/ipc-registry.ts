@@ -11,8 +11,8 @@
  *   - legacy: `switch-theme`, `get-themes`, `get-version`, `window-*`
  *   - panel:  `panel:*` (namespaced so they cannot collide with the above)
  */
-import { ipcMain, shell, BrowserWindow } from 'electron'
-import { subscribeBackend, getBackendLines, getLogDir } from './logging.js'
+import { ipcMain, shell, BrowserWindow, Notification } from 'electron'
+import { subscribeBackend, getBackendLines, getLogDir, log } from './logging.js'
 import type { BackendLine } from './logging.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import { savePreferences, loadPanelPrefs, savePanelPrefs, loadExternalEditor } from './preferences.js'
@@ -195,10 +195,32 @@ export function registerIpc(deps: IpcDeps): () => void {
   // chatty agent would otherwise ship megabytes per second over IPC), while the
   // panel's own 100ms batching stays the single throttle point.
   let revision = 0
+  /**
+   * Approval IDs already surfaced to the user, so we notify once per approval
+   * rather than once per change event (the stream fires on every frame).
+   * Pruned against the live pending list on every tick — that both bounds the
+   * set and lets an approval that comes back after its TTL notify again.
+   */
+  const notifiedApprovals = new Set<string>()
   const stream = deps.getStream?.() ?? null
   stream?.setOnChange(() => {
     revision += 1
     broadcast(getWindowManager(), 'panel:changes-rev', revision)
+
+    // System notification for each NEW pending approval. dsh already shows its
+    // own modal inside the webview; the OS toast makes sure the user notices
+    // even if the window is behind another app, and the taskbar flash makes the
+    // window itself jump back to the front.
+    const approvals = stream?.approvals() ?? []
+    const live = new Set(approvals.map((a) => a.approvalId))
+    for (const id of notifiedApprovals) {
+      if (!live.has(id)) notifiedApprovals.delete(id)
+    }
+    for (const approval of approvals) {
+      if (notifiedApprovals.has(approval.approvalId)) continue
+      notifiedApprovals.add(approval.approvalId)
+      notifyApprovalRequired(approval)
+    }
   })
 
   // Health has no feed of its own: the monitor emits on change, and a ticker
@@ -221,4 +243,82 @@ export function registerIpc(deps: IpcDeps): () => void {
     stream?.setOnChange(undefined)
     clearInterval(ticker)
   }
+}
+
+/**
+ * Surface one new pending approval to the user.
+ *
+ * dsh already shows its own modal inside the webview — this layer exists so
+ * the user notices even when the window is behind another app, AND so the
+ * panel itself can take focus visually without the user having to scan the
+ * title bar.
+ *
+ * The toast text is short on purpose: system notifications are glanceable,
+ * and the panel already carries the full tool/argument detail.
+ */
+function notifyApprovalRequired(approval: {
+  approvalId: string
+  toolName: string
+  sessionId: string
+}): void {
+  const summary = friendlyApprovalLabel(approval.toolName)
+  const body = `${summary}\n点击右侧面板或此通知查看详情并决定。`
+  try {
+    if (Notification.isSupported()) {
+      const n = new Notification({
+        title: 'dsh 需要你的确认',
+        body,
+        urgency: 'normal',
+        silent: false,
+      })
+      n.on('click', () => {
+        const wm = getWindowManagerCached?.()
+        if (wm) {
+          wm.togglePanel()
+          try { wm.window.show() } catch { /* window gone */ }
+        }
+      })
+      n.show()
+    }
+  } catch (err) {
+    // Notification is a best-effort enhancement; never break the change-review
+    // flow because the OS rejected the toast.
+    log('launcher', `approval notification failed: ${(err as Error).message}`)
+  }
+
+  // Flash the taskbar icon so the window itself pulls attention even if the
+  // notification center is full / suppressed. No-op on platforms that ignore it.
+  try {
+    const wm = getWindowManagerCached?.()
+    wm?.window.flashFrame?.(true)
+  } catch { /* not supported everywhere */ }
+}
+
+/**
+ * Human-readable label for one approval tool. Falls back to the raw id when we
+ * do not recognise it — better than shipping an empty string to the OS.
+ */
+function friendlyApprovalLabel(tool: string): string {
+  if (!tool) return 'agent 需要继续操作'
+  // Common cases. Extend as new tool types are seen in the wild.
+  const known: Record<string, string> = {
+    'shell': '执行 shell 命令',
+    'edit': '修改文件',
+    'write': '创建文件',
+    'read': '读取文件',
+    'web': '访问网页',
+    'browser': '访问网页',
+    'glob': '搜索文件',
+    'grep': '搜索文本',
+    'ask_user': '向你提问',
+  }
+  return known[tool] ?? `调用 ${tool}`
+}
+
+// Late-bound lookup so notifyApprovalRequired (defined outside registerIpc)
+// can still reach the WindowManager. main.ts is the only place that knows about
+// it, so it wires `setWindowManagerAccessor` once on boot.
+let getWindowManagerCached: (() => WindowManager | null) | null = null
+export function setWindowManagerAccessor(fn: () => WindowManager | null): void {
+  getWindowManagerCached = fn
 }

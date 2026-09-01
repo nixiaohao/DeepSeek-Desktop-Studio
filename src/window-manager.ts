@@ -77,11 +77,25 @@ export class WindowManager {
     const preload = join(__dirname, 'panel-preload.js')
     const assets = join(app.getAppPath(), 'assets')
 
+    // IMPORTANT: `sandbox: false` here and on every overlay.
+    //
+    // Electron 22+ defaults webPreferences.sandbox to true. In a sandboxed
+    // renderer the preload script is allowed only `require('electron')`,
+    // `require('events')`, etc. — NOT project files. panel-preload.js requires
+    // `./path-links.js` and `./health-monitor.js` (both bundled in app.asar),
+    // and the second require fails before contextBridge.exposeInMainWorld runs,
+    // so `window.dshPanel` stays undefined and the panel shows
+    // "preload 未加载". The main window's preload only requires 'electron'
+    // so it survives either way, but for the overlays we MUST opt out.
+    //
+    // It is still safe: panel.html / statusbar.html are our own static assets
+    // loaded from `file://` inside app.asar, not remote content.
     this.panelView = new WebContentsView({
       webPreferences: {
         preload,
         contextIsolation: true,
         nodeIntegration: false,
+        sandbox: false,
       },
     })
     this.panelView.webContents.loadFile(join(assets, 'panel.html'))
@@ -91,9 +105,26 @@ export class WindowManager {
         preload,
         contextIsolation: true,
         nodeIntegration: false,
+        sandbox: false,
       },
     })
     this.statusView.webContents.loadFile(join(assets, 'statusbar.html'))
+
+    // Catch preload failures. Electron emits this when the script throws OR
+    // never finishes loading. Without it the user sees only a dead "preload 未
+    // 加载" string with no clue why; with it we get a real reason in the log
+    // and panel.html can show it instead of the dead default.
+    for (const view of [this.panelView, this.statusView]) {
+      if (!view) continue
+      const label = view === this.panelView ? 'panel' : 'statusbar'
+      view.webContents.on('preload-error', (_e, preloadPath, err) => {
+        const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+        log('launcher', `preload-error[${label}] path=${preloadPath} ${message}`)
+      })
+      view.webContents.on('render-process-gone', (_e, details) => {
+        log('launcher', `renderer-gone[${label}] reason=${details.reason} exitCode=${details.exitCode}`)
+      })
+    }
 
     this.win.contentView.addChildView(this.panelView)
     this.win.contentView.addChildView(this.statusView)

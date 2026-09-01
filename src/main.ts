@@ -30,7 +30,7 @@ import { log, getLogDir, isDebug, redactTokenInText } from './logging.js'
 import { relaunchApp } from './relaunch.js'
 import { WindowManager } from './window-manager.js'
 import { HealthMonitor } from './health-monitor.js'
-import { registerIpc } from './ipc-registry.js'
+import { registerIpc, setWindowManagerAccessor } from './ipc-registry.js'
 import { DshStream } from './dsh-stream.js'
 import { describeEditorConfig, pickEditorInteractively } from './external-editor.js'
 
@@ -114,6 +114,9 @@ function createSplash(): BrowserWindow {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      // See window-manager.ts: sandbox:true (Electron 22+ default) blocks
+      // nodeIntegration and the legacy require() used by the splash page.
+      sandbox: false,
     },
   })
   splash.loadFile(join(app.getAppPath(), 'assets', 'splash.html'))
@@ -149,6 +152,12 @@ function createMainWindow(url: string): BrowserWindow {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // See window-manager.ts: the default since Electron 22 is sandbox:true,
+      // and a sandboxed preload is limited to require('electron'). Our main
+      // preload only requires electron, so this is actually unnecessary — but
+      // kept identical to the overlay config so any future require() inside
+      // preload.js does not silently break again.
+      sandbox: false,
     },
   })
 
@@ -167,12 +176,34 @@ function createMainWindow(url: string): BrowserWindow {
   // the first navigation is covered either way.
   windowManager = new WindowManager(win)
   windowManager.attach()
+  // Wire the accessor so the IPC layer (notably the approval-notification path
+  // defined next to registerIpc) can reach the WindowManager even though main
+  // process imports it after a circular boundary.
+  setWindowManagerAccessor(() => windowManager)
 
   win.once('ready-to-show', () => {
     splashWindow?.close()
     splashWindow = null
     win.show()
   })
+
+  // SAFETY NET: `ready-to-show` does NOT fire if the page errors during load
+  // (CSP rejection, network blip, dsh backend not yet up). With show:false the
+  // user sees only a taskbar icon forever. After 12s, if the page is still
+  // loading, force-show anyway — better to surface a blank page than stay
+  // invisible. (Reported 2026-09-01: only-taskbar-icon symptom.)
+  const showFallback = (): void => {
+    if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close()
+    splashWindow = null
+    if (!win.isDestroyed()) win.show()
+  }
+  const fallbackTimer = setTimeout(() => {
+    if (splashWindow && !win.isDestroyed() && win.webContents.isLoading()) {
+      log('launcher', 'ready-to-show 未在 12s 内触发，强制显示主窗口')
+      showFallback()
+    }
+  }, 12_000)
+  win.once('ready-to-show', () => clearTimeout(fallbackTimer))
 
   win.on('close', () => {
     const bounds = win.getBounds()
@@ -364,6 +395,9 @@ function createMarketWindow(): BrowserWindow {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      // See window-manager.ts: must opt out of the Electron 22+ default
+      // sandbox or nodeIntegration:true is rejected by Chromium.
+      sandbox: false,
     },
   })
   win.loadFile(join(app.getAppPath(), 'assets', 'install-market.html'))

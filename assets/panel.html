@@ -210,8 +210,21 @@
   'use strict';
   var api = window.dshPanel;
   if (!api) {
+    // The bridge is dead, which means panel-preload.js threw before it reached
+    // contextBridge.exposeInMainWorld — a failed top-level require is the usual
+    // cause (Electron 22+ sandboxes preloads by default, so requires of files
+    // inside app.asar are rejected; window-manager.ts opts the overlays out).
+    //
+    // Nothing in THIS file can report the reason: the script that would have
+    // reported it is the one that failed. window-manager.ts listens for
+    // `preload-error` / `render-process-gone` and writes the real reason to
+    // launcher.log, so point the user straight at it instead of leaving a dead
+    // string on screen (which cost a whole round-trip on 2026-09-01).
     document.getElementById('output').innerHTML =
-      '<div class="empty">面板桥接不可用（preload 未加载）。</div>';
+      '<div class="empty">面板桥接不可用（preload 未加载）。<br><br>' +
+      '主进程已把真实原因写入日志：<br>' +
+      '<code>%APPDATA%\\deepseek-studio\\logs\\launcher.log</code><br><br>' +
+      '搜索 <code>preload-error</code> 或 <code>renderer-gone</code>。</div>';
     return;
   }
 

@@ -8,6 +8,29 @@
  *
  * Channels are namespaced `panel:*` so they can never collide with the main
  * preload's channels.
+ *
+ * LOADER DIAGNOSTICS
+ * ------------------
+ * Every overlay in window-manager.ts sets `sandbox: false`, so the static
+ * requires below resolve normally inside `app.asar`. (Electron 22+ defaults
+ * `webPreferences.sandbox` to true, and a sandboxed preload may only require
+ * 'electron'/'events' — the requires here would throw before
+ * `contextBridge.exposeInMainWorld` runs, leaving `window.dshPanel` undefined
+ * and the panel stuck on "preload 未加载". This cost a debugging round-trip on
+ * 2026-09-01; do not remove the `sandbox: false`.)
+ *
+ * If a top-level require ever fails again, NOTHING in this file can report it —
+ * the reporting code is in the file that failed. That is why the diagnostic
+ * lives on the main-process side: window-manager.ts listens for `preload-error`
+ * / `render-process-gone` and writes the real reason to
+ * %APPDATA%\deepseek-studio\logs\launcher.log, and panel.html points the user
+ * at that log.
+ *
+ * NOTE: the bridge object is the inline literal `contextBridge.exposeInMainWorld(
+ * 'dshPanel', { ... })` with keys at 2-space indent.
+ * test/panel-api.contract.cjs parses this exact form via brace matching; do not
+ * refactor it to a separate `const api = { ... }` without updating the test in
+ * lock-step. (Doing so once turned 20 assertions red.)
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 // Pure logic (no Electron dependency) — safe to expose to the panel page so it
