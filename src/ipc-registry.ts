@@ -112,7 +112,7 @@ export function registerIpc(deps: IpcDeps): () => void {
   // ── Panel: change review (dsh mux stream) ──
 
   ipcMain.handle('panel:changes-now', () => {
-    const stream = deps.getStream()
+    const stream = deps.getStream?.() ?? null
     return stream
       ? stream.panelSnapshot()
       : { changes: [], approvals: [], sessions: [], dropped: 0, connected: false }
@@ -125,7 +125,7 @@ export function registerIpc(deps: IpcDeps): () => void {
     if (outcome !== 'allowed-once' && outcome !== 'rejected') {
       return { ok: false, error: `未知的审批结果：${String(outcome)}` }
     }
-    const stream = deps.getStream()
+    const stream = deps.getStream?.() ?? null
     if (!stream) return { ok: false, error: '变更流尚未连接' }
     try {
       return await stream.respond(approvalId, outcome as ApprovalOutcome)
@@ -195,7 +195,7 @@ export function registerIpc(deps: IpcDeps): () => void {
   // chatty agent would otherwise ship megabytes per second over IPC), while the
   // panel's own 100ms batching stays the single throttle point.
   let revision = 0
-  const stream = deps.getStream()
+  const stream = deps.getStream?.() ?? null
   stream?.setOnChange(() => {
     revision += 1
     broadcast(getWindowManager(), 'panel:changes-rev', revision)

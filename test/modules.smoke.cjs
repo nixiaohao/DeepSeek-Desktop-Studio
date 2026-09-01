@@ -41,6 +41,26 @@ function assert(cond, label, detail) {
   else bad(label, detail)
 }
 
+// ── Fail loudly on a swallowed crash ──
+//
+// main.js installs an `uncaughtException` handler that only logs (correct for
+// the app: a stray async error must not kill the shell). In THIS process that
+// is a trap: a throw anywhere below aborts the rest of the file, gets
+// swallowed, and Node still exits 0 — every remaining assertion vanishes with
+// no red anywhere. That actually happened: adding the `getStream` dependency
+// to registerIpc() silently dropped the last 25 assertions.
+//
+// Listeners run in registration order and this one is registered before
+// main.js is required, so it wins and can force a non-zero exit.
+process.on('uncaughtException', (err) => {
+  bad('uncaught exception aborted the run', err && err.stack ? err.stack : String(err))
+  process.exit(1)
+})
+process.on('unhandledRejection', (reason) => {
+  bad('unhandled rejection', String(reason))
+  process.exit(1)
+})
+
 // ── Electron stub ──
 
 /** Calls made on the stub, so the test can prove the wiring ran. */
@@ -309,14 +329,38 @@ console.log('modules: registerIpc channel coverage')
 
 const { registerIpc } = require(path.join(LIB, 'ipc-registry.js'))
 
+/** Records what registerIpc did to the mux stream, so the wiring is asserted. */
+const streamCalls = { onChange: 'never-called', responded: [] }
+const fakeStream = {
+  setOnChange: (fn) => {
+    streamCalls.onChange = fn
+  },
+  panelSnapshot: () => ({ changes: [], approvals: [], sessions: [], dropped: 0, connected: true }),
+  respond: async (id, outcome) => {
+    streamCalls.responded.push([id, outcome])
+    return { ok: true }
+  },
+}
+
 const teardown = registerIpc({
   getWindowManager: () => null,
   getHealthMonitor: () => null,
+  getStream: () => fakeStream,
   getAppVersion: () => '0.0.0-smoke',
   restartBackend: async () => ({ ok: true }),
   getStatusInfo: () => ({ version: 'x', port: null, channel: 'next' }),
   quitApp: () => {},
 })
+
+// registerIpc must hook the mux stream for the change-review feed, and must
+// NOT hard-require it: `getStream` is genuinely absent before the first
+// successful launch, and a missing optional collaborator must not be able to
+// take down IPC registration (it used to: `deps.getStream()` threw).
+assert(
+  typeof streamCalls.onChange === 'function',
+  'registerIpc hooked the mux stream change feed',
+  `setOnChange received ${JSON.stringify(String(streamCalls.onChange))}`
+)
 
 assert(typeof teardown === 'function', 'registerIpc returns a teardown function', 'callers cannot unsubscribe the live feeds')
 
@@ -339,6 +383,36 @@ try {
   teardownError = err
 }
 assert(teardownError === null, 'teardown() runs cleanly', `teardown threw: ${teardownError && teardownError.message}`)
+assert(
+  !streamCalls.onChange,
+  'teardown() unhooks the mux stream change feed',
+  `setOnChange left as ${JSON.stringify(String(streamCalls.onChange))} — the stream would keep pushing into dead views`
+)
+
+// A caller that has no stream yet must still be able to register IPC. This is
+// the exact shape of the bug above: `deps.getStream()` was called
+// unconditionally and threw when the key was absent, killing the rest of this
+// file (and, in the app, every handler registered after it).
+let noStreamError = null
+let noStreamTeardown = null
+try {
+  noStreamTeardown = registerIpc({
+    getWindowManager: () => null,
+    getHealthMonitor: () => null,
+    getAppVersion: () => '0.0.0-smoke',
+    restartBackend: async () => ({ ok: true }),
+    getStatusInfo: () => ({ version: 'x', port: null, channel: 'next' }),
+    quitApp: () => {},
+  })
+  noStreamTeardown()
+} catch (err) {
+  noStreamError = err
+}
+assert(
+  noStreamError === null,
+  'registerIpc tolerates a caller with no mux stream',
+  `threw: ${noStreamError && noStreamError.message}`
+)
 
 // ── 6. setupMenu builds the new entries ──
 
@@ -375,5 +449,16 @@ try {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 } catch { /* best effort */ }
 
+// Belt and braces: even with the uncaughtException guard above, assert that the
+// whole file actually ran. An early abort used to be indistinguishable from a
+// clean pass because nothing checked how much of the suite executed.
+const MIN_ASSERTIONS = 55
+assert(
+  pass + fail >= MIN_ASSERTIONS,
+  `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,
+  `only ${pass + fail} assertions ran — the file aborted early`
+)
+
 console.log(`\nmodules: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)
+
