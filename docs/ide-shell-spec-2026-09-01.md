@@ -383,3 +383,63 @@ agent 会话 → 观察输出实时追加 → 手动 kill 后端进程 → 确�
   手动 kill 后端 → 状态栏转红且出现「重启服务」→ 点击后恢复且页面**不白屏** →
   右键输出里的路径能跳外部编辑器。
 - **P2 未做**：变更审阅（接 SSE `DiffCallView` + `approval/requested`）、文件树、git 面板。
+
+---
+
+## 14. P2 变更审阅（2026-09-01 第四轮，已完成）
+
+### 新增模块
+| 文件 | 职责 |
+|---|---|
+| `src/event-store.ts` | **纯逻辑**：SSE 重组、帧归约、call↔approval 关联、变更状态机 |
+| `src/dsh-stream.ts` | **唯一 I/O 层**：SSE 连接、退避重连、`session.list` 轮询、`respond()` |
+
+两者严格分离 —— 线路规则（最容易在上游升级时坏、且毫无编译期保护的部分）
+全部落在可单测的纯逻辑里；I/O 层薄到只剩 fetch 与定时器。
+`dsh-stream.ts` 只依赖 `node:crypto`，**不 import electron**，因此可以在纯 node 下
+给 `globalThis.fetch` 打桩驱动真实类。
+
+### 线路契约（rc.2 实测）
+- `GET /api/events.mux` → `data: <ServerRequest>\n\n`；**payload 才是帧本体**，
+  `rpcId` 在信封层。开流首行是 `: connected\n\n` 注释，不是帧。
+- 一帧的 JSON 常被 TCP 切开 → **只能按 `\n\n` 切**。
+- `POST /api/respond` 是 **client-response**，必须 echo 信封的 `rpcId`，
+  `outcome` 只允许 `allowed-once` / `rejected`。
+- 鉴权：rc.2 **完全无 token**；新版追加 `/?token=`。两种都兼容。
+
+### 三条关联规则（漏掉功能就废，且完全无报错）
+1. `approval/requested` **不带 diff**，只有可选 `callId` —— 那是回到携带
+   `DiffCallView` 的 `tool/call` 的唯一线索。不 join 就只能说「write 请求授权」，
+   说不出要写什么。
+2. `tool/result` 才证明变更落盘（`tool/call` 只是意图，可能被拒）。
+3. 信封 `rpcId` 必须带到 UI —— 丢了就渲染出一个永远答不了的审批卡片，
+   host 只回 `{accepted:false,reason:'not-pending'}`。
+
+### 修掉的两个真 bug（都是测试逼出来的，并反向验证过「改回旧代码测试确实会红」）
+1. **淘汰时钟误用事件时间戳** → 回放或时钟偏移会让变更一进来就被判为过期。
+   改为 `seenAt`（本进程观察到的时刻），且重复投递不续期。
+2. **`teardown()` 没清 `running`** → 后端重启换 URL 后 `start()` 走提前 return，
+   **永不重连**。这是重启路径的必踩点（新 token = 新 URL）。
+
+### 顺带修掉的 P1 遗留：CSP 静默杀死叠加层
+`panel.html` / `statusbar.html` 是内联脚本页却配 `script-src 'self'`，
+Chromium 会**静默丢弃**内联脚本 → 页面渲染正常、按钮全死、无任何可见报错。
+已改为放行 `'unsafe-inline'`（`default-src 'none'` 仍拦一切远端加载），
+并在 `test/panel-api.contract.cjs` 加了静态校验防复发。
+
+### 性能取舍
+diff 携带整个文件内容，逐帧广播 IPC 会每秒传几 MB → 主进程只推 **revision 数字**，
+面板自己按 120ms 节流拉 `getChanges()`，节流点只有一处。
+
+### 测试（354 条断言全绿）
+- `test/event-store.unit.cjs`（37）：跨 chunk 重组（含 7 字节切片喂完整报文）、
+  注释行、多帧聚合、坏帧不杀流、审批生命周期、容量上限、TTL。
+- `test/dsh-stream.unit.cjs`（28）：假 fetch 驱动真实类 —— URL/token 两种形态、
+  respond 回显 rpcId、被拒回执透出 host reason、退避重连、换 URL 重连、
+  token 不进日志。
+- `test/panel-api.contract.cjs`（58 → 72）：新增 CSP ↔ 内联脚本一致性校验。
+
+### 仍未做
+- **GUI 未实跑**（沙箱跑不了 Electron 渲染管线）。
+- P2 剩余：文件树、git 面板（dsh 侧零 git 集成、零文件树，需自建：主进程
+  `fs` + `spawn git` 即可，不必求 dsh 开接口）。
