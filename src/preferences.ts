@@ -6,6 +6,31 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { recoveryGuide, type ChannelId } from './channels.js'
+// Type-only: external-editor.ts imports Electron, and preferences must stay
+// loadable in pure-node contexts (tests).
+import type { EditorConfig } from './external-editor.js'
+
+/** Geometry + visibility of the overlay panel and status bar. */
+export interface PanelPrefs {
+  /** Right-hand panel shown at all. */
+  visible: boolean
+  /** Panel width in px. */
+  width: number
+  /** Height of the monitor section inside the panel (splitter position). */
+  monitorHeight: number
+  /** Bottom status bar shown. */
+  statusVisible: boolean
+  /**
+   * Inject padding CSS into the dsh page so its content reflows out from
+   * under the overlay instead of being covered by it.
+   *
+   * The overlay views cannot shrink the page's own webContents (Electron keeps
+   * it outside contentView.children), so CSS padding is the only way to avoid
+   * covering content. If it ever causes layout trouble for a particular dsh
+   * build, the user can switch it off from the menu and get plain overlay.
+   */
+  avoidCss: boolean
+}
 
 interface Preferences {
   themeId: string
@@ -35,6 +60,25 @@ interface Preferences {
     installedAt?: string
     lastError?: string
   }
+  /** Right panel + status bar geometry. */
+  panel?: PanelPrefs
+  /**
+   * Editor used when the user clicks a file path. Empty `command` means "use
+   * the OS file association".
+   */
+  externalEditor?: EditorConfig
+}
+
+/** Sensible starting geometry for the panel. */
+export const DEFAULT_PANEL_PREFS: PanelPrefs = {
+  // Starts hidden: the user asked for the panel to be openable from the menu
+  // rather than permanently docked, which also means it cannot occlude the dsh
+  // UI before it is wanted.
+  visible: false,
+  width: 340,
+  monitorHeight: 220,
+  statusVisible: true,
+  avoidCss: true,
 }
 
 const DEFAULTS: Preferences = {
@@ -77,6 +121,32 @@ export function savePreferences(prefs: Partial<Preferences>) {
   const current = loadPreferences()
   const merged = { ...current, ...prefs }
   writeFileSync(PREFS_FILE, JSON.stringify(merged, null, 2), 'utf-8')
+}
+
+/**
+ * Panel geometry with defaults applied per field.
+ *
+ * Merged field-by-field rather than whole-object so that adding a new panel
+ * setting later does not wipe out the geometry the user already saved.
+ */
+export function loadPanelPrefs(): PanelPrefs {
+  const p = loadPreferences().panel
+  return { ...DEFAULT_PANEL_PREFS, ...(p ?? {}) }
+}
+
+/** Persist a partial change to the panel geometry. */
+export function savePanelPrefs(patch: Partial<PanelPrefs>): void {
+  savePreferences({ panel: { ...loadPanelPrefs(), ...patch } })
+}
+
+/** The configured external editor, or undefined to use the OS default. */
+export function loadExternalEditor(): EditorConfig | undefined {
+  return loadPreferences().externalEditor
+}
+
+/** Persist the external editor choice. */
+export function saveExternalEditor(config: EditorConfig): void {
+  savePreferences({ externalEditor: config })
 }
 
 /**

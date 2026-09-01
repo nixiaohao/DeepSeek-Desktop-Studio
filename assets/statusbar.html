@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline';" />
+<title>状态栏</title>
+<style>
+  :root {
+    --bg: #1a1d26;
+    --border: #272b36;
+    --fg: #d6dae3;
+    --dim: #8b93a7;
+    --accent: #4c8dff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    border-top: 1px solid var(--border);
+    user-select: none;
+  }
+  #bar {
+    height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 8px;
+  }
+  #dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none;
+  }
+  #phase { font-weight: 600; }
+  #detail {
+    color: var(--dim); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 45%;
+  }
+  .sep { width: 1px; height: 12px; background: var(--border); }
+  .spacer { flex: 1; }
+  #errors { color: var(--dim); }
+  #meta { color: var(--dim); white-space: nowrap; }
+  button {
+    background: #22262f; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .c-starting { color: #4c8dff; }
+  .c-ready    { color: #3ddc84; }
+  .c-idle     { color: #8b93a7; }
+  .c-degraded { color: #ffb454; }
+  .c-exited   { color: #ff6b6b; }
+  .c-error    { color: #ff6b6b; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span id="dot"></span>
+    <span id="phase">启动中</span>
+    <span class="sep"></span>
+    <span id="detail"></span>
+    <span class="spacer"></span>
+    <span id="errors"></span>
+    <span class="sep"></span>
+    <span id="meta"></span>
+    <button id="btn-logs" title="打开日志文件夹">日志</button>
+    <button id="btn-restart" title="仅重启后端服务">重启服务</button>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var api = window.dshPanel;
+  if (!api) return;
+
+  var dot = document.getElementById('dot');
+  var phaseEl = document.getElementById('phase');
+  var detailEl = document.getElementById('detail');
+  var errorsEl = document.getElementById('errors');
+  var metaEl = document.getElementById('meta');
+  var restartBtn = document.getElementById('btn-restart');
+  var logsBtn = document.getElementById('btn-logs');
+
+  function label(phase) {
+    try { return api.phaseLabel(phase) || phase; } catch (e) { return phase; }
+  }
+
+  function render(s) {
+    if (!s) return;
+    var c = 'c-' + s.phase;
+    phaseEl.className = c;
+    phaseEl.textContent = label(s.phase);
+    dot.style.background = getComputedStyle(phaseEl).color;
+    detailEl.textContent = s.detail || '';
+    detailEl.title = s.detail || '';
+    errorsEl.textContent = s.recentErrors > 0 ? ('错误 ' + s.recentErrors) : '';
+
+    // Only offer a restart once something is actually wrong; a restart while
+    // healthy would throw away a live session for no reason.
+    var broken = s.phase === 'exited' || s.phase === 'error';
+    restartBtn.style.display = broken ? '' : 'none';
+  }
+
+  api.getHealth().then(render).catch(function () {});
+  api.onHealth(render);
+
+  api.getStatusInfo().then(function (info) {
+    if (!info) return;
+    var parts = [];
+    if (info.version) parts.push('dsh ' + info.version);
+    if (info.port) parts.push(':' + info.port);
+    if (info.channel) parts.push(info.channel);
+    metaEl.textContent = parts.join('  ');
+  }).catch(function () {});
+
+  restartBtn.onclick = function () {
+    restartBtn.disabled = true;
+    restartBtn.textContent = '重启中…';
+    api.restartBackend().then(function (r) {
+      restartBtn.disabled = false;
+      restartBtn.textContent = '重启服务';
+      if (r && !r.ok) {
+        detailEl.textContent = '重启失败：' + (r.error || '未知错误');
+        detailEl.className = 'c-error';
+      }
+    });
+  };
+
+  logsBtn.onclick = function () { api.openLogs(); };
+})();
+</script>
+</body>
+</html>

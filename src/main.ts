@@ -7,24 +7,31 @@
  * and surfaces through dialogs with 「打开日志文件夹」/「重试」actions.
  * `--debug` (or DSH_DEBUG=1) shows real child-process terminals.
  */
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import { join } from 'node:path'
 import { Launcher } from './launcher.js'
-import { loadCurrentThemeCSS, listThemes } from './theme.js'
+import { loadCurrentThemeCSS } from './theme.js'
 import {
   loadPreferences,
   savePreferences,
   recoveryGuidePath,
   hasRecoveryGuide,
+  loadPanelPrefs,
+  loadExternalEditor,
+  saveExternalEditor,
 } from './preferences.js'
-import { channelDef, type ChannelId } from './channels.js'
+import { channelDef, normalizeChannel, type ChannelId } from './channels.js'
 import { createTray, destroyTray } from './tray.js'
-import { setupMenu } from './menu.js'
+import { setupMenu, type MenuActions } from './menu.js'
 import { resolveWorkspace } from './workspace.js'
 import { loadPackagedIcon } from './icons.js'
 import { runWizard } from './wizard.js'
 import { log, getLogDir, isDebug } from './logging.js'
 import { relaunchApp } from './relaunch.js'
+import { WindowManager } from './window-manager.js'
+import { HealthMonitor } from './health-monitor.js'
+import { registerIpc } from './ipc-registry.js'
+import { describeEditorConfig, pickEditorInteractively } from './external-editor.js'
 
 // ── Startup hardening (must run before app ready) ──
 // 1. GPU 加速在虚拟机/远程桌面/部分驱动上会导致白屏或启动崩溃，本应用为 Web UI 外壳，无需 GPU。
@@ -79,6 +86,12 @@ let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
 let marketWindow: BrowserWindow | null = null
 let launcher: Launcher | null = null
+/** Overlay panel + status bar owner. Created together with the main window. */
+let windowManager: WindowManager | null = null
+/** Backend health state machine, fed by the backend output subscription. */
+let healthMonitor: HealthMonitor | null = null
+/** Unsubscribes the IPC feeds. Must run on window close / quit. */
+let teardownIpc: (() => void) | null = null
 
 // ── Splash Window ──
 
@@ -141,6 +154,12 @@ function createMainWindow(url: string): BrowserWindow {
 
   win.loadURL(url)
 
+  // Overlay panel + status bar. Attached AFTER loadURL: attach() injects the
+  // avoidance padding right away, and re-injects on every did-finish-load, so
+  // the first navigation is covered either way.
+  windowManager = new WindowManager(win)
+  windowManager.attach()
+
   win.once('ready-to-show', () => {
     splashWindow?.close()
     splashWindow = null
@@ -161,11 +180,85 @@ function createMainWindow(url: string): BrowserWindow {
 
   win.on('closed', () => {
     mainWindow = null
+    // Release the overlay views and the live feeds: without this the backend
+    // subscription and the 5s health ticker keep closures alive for the
+    // lifetime of the process.
+    teardownIpc?.()
+    teardownIpc = null
+    windowManager?.destroy()
+    windowManager = null
     launcher?.shutdown()
     destroyTray()
   })
 
   return win
+}
+
+// ── Backend health ──
+
+/**
+ * True while a restart is in flight.
+ *
+ * A restart takes seconds (the harness has to boot again), and both the status
+ * bar and the 视图 menu expose it. Without a guard, two clicks spawn two
+ * backends: the second loses the port race, and the window ends up pointed at
+ * whichever URL won — with no way to tell which process the UI is talking to.
+ */
+let restarting = false
+
+/**
+ * Restart only the backend, then RELOAD the main window on the new URL.
+ *
+ * The reload is not optional. `dsh web` mints a fresh per-process token on
+ * every launch, so after a restart the page's session cookie is dead and every
+ * request answers 401 — the user would see a white screen and conclude the
+ * restart broke things.
+ *
+ * Never restarts on its own. A backend that is mid-session may hold work the
+ * user cares about, so this only ever runs from an explicit click.
+ */
+async function restartBackend(): Promise<{ ok: boolean; error?: string }> {
+  if (!launcher) return { ok: false, error: '启动器尚未就绪' }
+  if (restarting) return { ok: false, error: '重启正在进行中' }
+
+  restarting = true
+  log('launcher', 'restartBackend: restarting dsh web on user request')
+  healthMonitor?.noteRestart()
+
+  try {
+    const result = await launcher.restart((msg) => log('launcher', `[restart] ${msg}`))
+    if (!result.ok) {
+      const error = result.error ?? '未知错误'
+      healthMonitor?.noteSpawnError(`重启失败：${error}`)
+      return { ok: false, error }
+    }
+
+    // NOT optional — see the note above this function.
+    if (mainWindow) {
+      try {
+        await mainWindow.loadURL(result.url)
+      } catch (err) {
+        const error = `服务已重启，但页面重新加载失败：${(err as Error).message}`
+        healthMonitor?.noteSpawnError(error)
+        return { ok: false, error }
+      }
+    }
+
+    healthMonitor?.noteReady()
+    log('launcher', 'restartBackend: done')
+    return { ok: true }
+  } finally {
+    restarting = false
+  }
+}
+
+/** Version / port / channel for the status bar. */
+function statusInfo(): { version: string; port: number | null; channel: string } {
+  return {
+    version: launcher?.runtimeSrc.dshVersion() ?? 'unknown',
+    port: launcher?.port ?? null,
+    channel: normalizeChannel(loadPreferences().channel),
+  }
 }
 
 // ── Unified quit: release everything, then hard-exit ──
@@ -184,6 +277,12 @@ function createMainWindow(url: string): BrowserWindow {
  */
 function quitApp(): void {
   log('launcher', 'quitApp: tearing down...')
+  teardownIpc?.()
+  teardownIpc = null
+  try {
+    windowManager?.destroy()
+  } catch { /* window already gone */ }
+  windowManager = null
   try {
     if (mainWindow) {
       const b = mainWindow.getBounds()
@@ -547,45 +646,32 @@ function showLaunchError(err: Error, retry: () => void): void {
   }
 }
 
-// ── IPC Handlers ──
+// ── Menu actions ──
 
-function setupIPC() {
-  ipcMain.on('switch-theme', (event, themeId: string) => {
-    savePreferences({ themeId })
-    if (mainWindow) {
-      const css = loadCurrentThemeCSS()
-      mainWindow.webContents.reload()
-      mainWindow.webContents.once('did-finish-load', () => {
-        if (css) mainWindow!.webContents.insertCSS(css)
-      })
-    }
-  })
-
-  ipcMain.handle('get-themes', () => listThemes())
-  ipcMain.handle('get-version', () => launcher?.version ?? 'unknown')
-
-  ipcMain.on('window-minimize', (event) => {
-    BrowserWindow.fromWebContents(event.sender)?.minimize()
-  })
-  ipcMain.on('window-maximize', (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (win?.isMaximized()) win.unmaximize()
-    else win?.maximize()
-  })
-  ipcMain.on('window-close', (event) => {
-    BrowserWindow.fromWebContents(event.sender)?.close()
-    quitApp()
-  })
+/**
+ * Build the action bundle the menu needs.
+ *
+ * A single object rather than 10 positional callbacks: the menu gained panel
+ * and editor entries, and positional booleans/callbacks that deep are a
+ * transposition bug waiting to happen.
+ */
+/**
+ * Rebuild the menu so its checkbox/radio marks match reality.
+ *
+ * Electron does not refresh menu items on its own: `checked` is baked in when
+ * the template is built, so toggling the panel from a keyboard shortcut would
+ * otherwise leave 视图 → 监控面板 showing the previous state.
+ */
+function rebuildMenu(): void {
+  setupMenu(buildMenuActions())
 }
 
-// ── App Lifecycle ──
-
-app.whenReady().then(async () => {
-  setupMenu(
-    () => {
+function buildMenuActions(): MenuActions {
+  return {
+    onCheckUpdate: () => {
       void handleCheckUpdate()
     },
-    () => {
+    onInstallPluginMarket: () => {
       // Manual entry (menu → 插件市场 → 安装): report when it's already
       // there; otherwise install directly. Deliberately skips the ask step —
       // clicking the menu item IS the user's explicit intent, and going
@@ -602,17 +688,79 @@ app.whenReady().then(async () => {
       }
       void installMarketWithWindow()
     },
-    () => {
+    onShowAbout: () => {
       showAboutDialog()
     },
-    (id: ChannelId) => {
+    onSelectChannel: (id: ChannelId) => {
       handleSelectChannel(id)
     },
-    () => {
+    onShowRecovery: () => {
       handleShowRecovery()
-    }
-  )
-  setupIPC()
+    },
+
+    getPanelState: () => {
+      const p = windowManager?.panelPrefs ?? loadPanelPrefs()
+      return { panel: p.visible, statusBar: p.statusVisible, avoidCss: p.avoidCss }
+    },
+    togglePanel: () => {
+      windowManager?.togglePanel()
+      rebuildMenu()
+    },
+    toggleStatusBar: () => {
+      const next = !(windowManager?.panelPrefs.statusVisible ?? loadPanelPrefs().statusVisible)
+      windowManager?.setStatusVisible(next)
+      rebuildMenu()
+    },
+    toggleAvoidCss: () => {
+      const next = !(windowManager?.panelPrefs.avoidCss ?? loadPanelPrefs().avoidCss)
+      windowManager?.setAvoidCss(next)
+      rebuildMenu()
+    },
+
+    restartBackend: () => {
+      // The status bar reports failures inline; the menu has no place to put
+      // them, so surface them as a dialog instead of failing silently.
+      void restartBackend().then((r) => {
+        if (!r || r.ok) return
+        dialog.showMessageBox(mainWindow ?? undefined!, {
+          type: 'error',
+          title: '重启后端服务失败',
+          message: r.error ?? '未知错误',
+          detail: `完整日志目录：${getLogDir()}`,
+          buttons: ['确定'],
+        })
+      })
+    },
+    openLogs: () => {
+      void shell.openPath(getLogDir())
+    },
+
+    describeEditor: () => describeEditorConfig(loadExternalEditor()),
+    chooseEditor: () => {
+      pickEditorInteractively(mainWindow)
+      // The 设置 menu shows the current editor in its disabled hint line.
+      rebuildMenu()
+    },
+  }
+}
+
+// ── App Lifecycle ──
+
+app.whenReady().then(async () => {
+  healthMonitor = new HealthMonitor()
+
+  // All IPC lives in ipc-registry.ts now. main.ts had grown past 700 lines and
+  // every new panel action meant touching it.
+  teardownIpc = registerIpc({
+    getWindowManager: () => windowManager,
+    getHealthMonitor: () => healthMonitor,
+    getAppVersion: () => launcher?.version ?? app.getVersion(),
+    restartBackend,
+    getStatusInfo: statusInfo,
+    quitApp,
+  })
+
+  setupMenu(buildMenuActions())
 
   // 1. Resolve the workspace (exe dir → source-dir.txt → userData fallback)
   const workspace = resolveWorkspace()
@@ -649,15 +797,36 @@ app.whenReady().then(async () => {
   // 3. Splash + launch
   splashWindow = createSplash()
   launcher = new Launcher(workspace.dir)
+
+  // Hook the backend process lifecycle into the health monitor BEFORE the
+  // first spawn: a crash during startup must surface in the status bar, not
+  // only in the (invisible) log file.
+  launcher.onExit = (code) => {
+    log('launcher', `health: backend exit ${code}`)
+    healthMonitor?.noteExit(code)
+  }
+  launcher.onSpawnError = (message) => {
+    log('launcher', `health: backend spawn error ${message}`)
+    healthMonitor?.noteSpawnError(message)
+  }
+
   splashWindow.webContents.once('did-finish-load', () => {
     splashWindow?.webContents.send('version', launcher!.version)
   })
 
+  // Counted so the first attempt does not show up as "restarted once" in the
+  // status bar: noteRestart() is only for genuine re-launches.
+  let launchAttempt = 0
+
   async function doLaunch(): Promise<void> {
     try {
+      launchAttempt += 1
+      if (launchAttempt > 1) healthMonitor?.noteRestart()
       const result = await launcher!.launch((msg) => {
         splashWindow?.webContents.send('progress', msg)
       })
+      healthMonitor?.noteReady()
+      log('launcher', `backend ready on port ${result.port}`)
       mainWindow = createMainWindow(result.url)
       createTray(mainWindow, launcher!, quitApp)
 
@@ -667,6 +836,10 @@ app.whenReady().then(async () => {
       // is non-critical and can take minutes.
       void promptPluginMarket()
     } catch (err) {
+      // Keep the health state honest even though the launch-error dialog is
+      // what the user sees: a retry calls doLaunch() again, which resets it via
+      // noteRestart().
+      healthMonitor?.noteSpawnError((err as Error).message || String(err))
       showLaunchError(err as Error, doLaunch)
     }
   }

@@ -2,35 +2,59 @@
  * menu.ts — Custom application menu (Chinese).
  * Only includes functional items; removes default Electron items that don't apply.
  */
-import { app, Menu, shell, type MenuItemConstructorOptions } from 'electron'
+import { app, dialog, Menu, shell, type MenuItemConstructorOptions } from 'electron'
 import { relaunchApp } from './relaunch.js'
 import { CHANNELS, normalizeChannel, type ChannelId } from './channels.js'
 import { loadPreferences } from './preferences.js'
 
 /**
- * Build and set the application menu.
- * @param onCheckUpdate called when the user clicks "Check for updates"
- * @param onInstallPluginMarket called when the user clicks "Install plugin market"
- * @param onShowAbout called when the user clicks "About" (custom dialog)
- * @param onSelectChannel called with the chosen channel id from 更新通道
- * @param onShowRecovery called when the user clicks 打开恢复指引
+ * Everything the menu can do.
+ *
+ * A single object instead of a positional parameter list: the menu has grown
+ * panel and editor entries, and ten positional callbacks is a transposition
+ * bug waiting to happen.
  */
-export function setupMenu(
-  onCheckUpdate: () => void,
-  onInstallPluginMarket: () => void,
-  onShowAbout: () => void,
-  onSelectChannel: (id: ChannelId) => void,
+export interface MenuActions {
+  // ── pre-existing ──
+  onCheckUpdate: () => void
+  onInstallPluginMarket: () => void
+  onShowAbout: () => void
+  onSelectChannel: (id: ChannelId) => void
   onShowRecovery: () => void
-): void {
+
+  // ── overlay panel / status bar ──
+  /** Current visibility flags, read when the menu is built. */
+  getPanelState: () => { panel: boolean; statusBar: boolean; avoidCss: boolean }
+  togglePanel: () => void
+  toggleStatusBar: () => void
+  toggleAvoidCss: () => void
+
+  // ── backend ──
+  restartBackend: () => void
+  openLogs: () => void
+
+  // ── external editor ──
+  /** Human-readable description of the current editor. */
+  describeEditor: () => string
+  chooseEditor: () => void
+}
+
+/**
+ * Build and set the application menu.
+ * Menu structure is rebuilt from scratch on every call, so checkbox/radio
+ * marks always reflect the state read at build time.
+ */
+export function setupMenu(actions: MenuActions): void {
   // Read at build time; switching a channel relaunches the app, which rebuilds
   // the menu, so the radio mark stays in sync.
   const currentChannel = normalizeChannel(loadPreferences().channel)
+  const panel = actions.getPanelState()
 
   const template: MenuItemConstructorOptions[] = [
     {
       label: app.name,
       submenu: [
-        { label: '关于 DeepSeek Studio', click: () => onShowAbout() },
+        { label: '关于 DeepSeek Studio', click: () => actions.onShowAbout() },
         { type: 'separator' },
         { label: '退出', role: 'quit' },
       ],
@@ -59,6 +83,37 @@ export function setupMenu(
         { label: '缩小', role: 'zoomOut' },
         { type: 'separator' },
         { label: '全屏', role: 'togglefullscreen' },
+        { type: 'separator' },
+        // ── Overlay panel ──
+        {
+          label: '监控面板',
+          accelerator: 'Ctrl+Alt+B',
+          type: 'checkbox',
+          checked: panel.panel,
+          click: () => actions.togglePanel(),
+        },
+        {
+          label: '状态栏',
+          accelerator: 'Ctrl+Alt+S',
+          type: 'checkbox',
+          checked: panel.statusBar,
+          click: () => actions.toggleStatusBar(),
+        },
+        {
+          label: '主界面避开面板（推荐）',
+          type: 'checkbox',
+          checked: panel.avoidCss,
+          click: () => actions.toggleAvoidCss(),
+        },
+        { type: 'separator' },
+        {
+          label: '重启后端服务',
+          click: () => actions.restartBackend(),
+        },
+        {
+          label: '打开日志文件夹',
+          click: () => actions.openLogs(),
+        },
       ],
     },
     {
@@ -66,7 +121,36 @@ export function setupMenu(
       submenu: [
         {
           label: '安装 dshmarket 插件市场',
-          click: () => onInstallPluginMarket(),
+          click: () => actions.onInstallPluginMarket(),
+        },
+      ],
+    },
+    {
+      label: '设置',
+      submenu: [
+        { label: `外部编辑器：${actions.describeEditor()}`, enabled: false },
+        {
+          label: '选择外部编辑器…',
+          click: () => actions.chooseEditor(),
+        },
+        {
+          label: '外部编辑器说明',
+          click: () => {
+            dialog.showMessageBox({
+              type: 'info',
+              title: '外部编辑器',
+              message: '点击输出里的文件路径时，用哪个编辑器打开？',
+              detail:
+                `当前：${actions.describeEditor()}\n\n` +
+                `· 预设（VS Code / Cursor / Notepad++）按 PATH 查找命令，\n` +
+                `  命令不在 PATH 里时请选择「浏览…」直接指定可执行文件。\n` +
+                `· 参数模板支持 {file} {line} {col} 占位符，留空等价于 {file}。\n` +
+                `· 未配置时使用系统默认程序打开文件。\n` +
+                `· 本程序不内置编辑器：编辑始终在你自己的编辑器里进行，\n` +
+                `  这样它只是一个「壳」，而不是一个半成品 IDE。`,
+              buttons: ['确定'],
+            })
+          },
         },
       ],
     },
@@ -75,7 +159,7 @@ export function setupMenu(
       submenu: [
         {
           label: '检查更新',
-          click: () => onCheckUpdate(),
+          click: () => actions.onCheckUpdate(),
         },
         { type: 'separator' },
         {
@@ -87,13 +171,13 @@ export function setupMenu(
               label: c.label,
               type: 'radio',
               checked: currentChannel === c.id,
-              click: () => onSelectChannel(c.id),
+              click: () => actions.onSelectChannel(c.id),
             })),
           ],
         },
         {
           label: '打开恢复指引',
-          click: () => onShowRecovery(),
+          click: () => actions.onShowRecovery(),
         },
         { type: 'separator' },
         {

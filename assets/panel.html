@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline';" />
+<title>面板</title>
+<style>
+  :root {
+    --bg: #14161d;
+    --bg-2: #1a1d26;
+    --border: #272b36;
+    --fg: #d6dae3;
+    --fg-dim: #8b93a7;
+    --accent: #4c8dff;
+    --err: #ff6b6b;
+    --out: #cfd6e4;
+    --ok: #3ddc84;
+    --warn: #ffb454;
+    --font: 12px/1.5 "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg); font: var(--font);
+    display: flex; flex-direction: row; user-select: none;
+  }
+
+  /* Left edge drag handle → resizes the whole panel via the main process. */
+  #resizer { width: 4px; cursor: ew-resize; background: transparent; flex: none; }
+  #resizer:hover, #resizer.dragging { background: var(--accent); }
+
+  #app { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  section { display: flex; flex-direction: column; min-height: 0; }
+  header {
+    flex: none; height: 26px; display: flex; align-items: center; gap: 8px;
+    padding: 0 8px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+    font-size: 11px; color: var(--fg-dim); white-space: nowrap;
+  }
+  header .title { color: var(--fg); font-weight: 600; }
+  header .spacer { flex: 1; }
+  header .hint { font-size: 10px; opacity: .7; }
+
+  button {
+    background: #22262f; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 1px 7px; font: var(--font); font-size: 11px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+
+  /* ── Changes area (placeholder until phase 2 wires the diff feed) ── */
+  #changes { flex: 1 1 auto; min-height: 80px; }
+  #changes .body {
+    flex: 1; overflow: auto; padding: 10px; color: var(--fg-dim); font-size: 11px;
+    user-select: text;
+  }
+
+  #splitter {
+    flex: none; height: 5px; cursor: ns-resize; background: var(--bg-2);
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  #splitter:hover, #splitter.dragging { background: var(--accent); }
+
+  /* ── Monitor ── */
+  #monitor { flex: none; height: 220px; }
+  #output {
+    flex: 1; overflow: auto; padding: 4px 6px; white-space: pre-wrap;
+    word-break: break-all; user-select: text;
+  }
+  .line { display: flex; gap: 6px; }
+  .line .ts { flex: none; color: #5d6377; }
+  .line .txt { flex: 1; min-width: 0; }
+  .line.err .txt { color: var(--err); }
+  .line.out .txt { color: var(--out); }
+  a.path { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); cursor: pointer; }
+  a.path:hover { background: rgba(76,141,255,.15); }
+
+  .empty { color: #5d6377; padding: 8px; font-size: 11px; }
+
+  label.chk { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer; }
+  label.chk input { margin: 0; }
+
+  /* ── Path context menu ── */
+  #path-menu {
+    position: fixed; display: none; z-index: 50; background: #22262f;
+    border: 1px solid var(--border); border-radius: 4px; padding: 3px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 180px;
+  }
+  #path-menu .path-text {
+    padding: 4px 8px; font-size: 10px; color: var(--fg-dim);
+    border-bottom: 1px solid var(--border); margin-bottom: 3px;
+    word-break: break-all; user-select: text;
+  }
+  #path-menu button {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    padding: 4px 8px; border-radius: 3px;
+  }
+  #path-menu button:hover { background: var(--accent); color: #fff; }
+
+  #toast {
+    position: fixed; left: 8px; bottom: 8px; background: #22262f; border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 10px; font-size: 11px; display: none; z-index: 60;
+    max-width: calc(100% - 16px); word-break: break-all;
+  }
+  #toast.err { border-color: var(--err); color: var(--err); }
+</style>
+</head>
+<body>
+  <div id="resizer" title="拖动调整面板宽度"></div>
+
+  <div id="app">
+    <section id="changes">
+      <header>
+        <span class="title">变更审阅</span>
+        <span class="spacer"></span>
+        <span class="hint">阶段二接入</span>
+      </header>
+      <div class="body">
+        这里将展示 agent 的变更（先看 diff → 批准 → 才执行）。<br /><br />
+        数据 dsh 已就绪（DiffCallView 在工具执行前就产出 oldText/newText），
+        本壳只需接 SSE 的审批帧即可，无需上游改动。<br /><br />
+        当前阶段先交付下方的运行监控。
+      </div>
+    </section>
+
+    <div id="splitter" title="拖动调整监控区高度"></div>
+
+    <section id="monitor">
+      <header>
+        <span class="title">运行监控</span>
+        <span class="spacer"></span>
+        <label class="chk"><input type="checkbox" id="chk-autoscroll" checked />自动滚动</label>
+        <button id="btn-clear" title="清空当前视图（不影响日志文件）">清空</button>
+        <button id="btn-logs">日志</button>
+        <button id="btn-restart">重启服务</button>
+      </header>
+      <div id="output"><div class="empty">等待后端输出…</div></div>
+    </section>
+  </div>
+
+  <div id="path-menu">
+    <div class="path-text"></div>
+    <button data-act="edit">用外部编辑器打开</button>
+    <button data-act="reveal">在文件夹中显示</button>
+    <button data-act="copy">复制路径</button>
+  </div>
+
+  <div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  var api = window.dshPanel;
+  if (!api) {
+    document.getElementById('output').innerHTML =
+      '<div class="empty">面板桥接不可用（preload 未加载）。</div>';
+    return;
+  }
+
+  var output = document.getElementById('output');
+  var autoScroll = document.getElementById('chk-autoscroll');
+  var MAX_LINES = 2000;
+  var FLUSH_MS = 100;
+
+  var pending = [];
+  var flushTimer = null;
+  var lineCount = 0;
+
+  // ── rendering ──────────────────────────────────────────────────────────
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  function fmtTs(ts) {
+    var d = new Date(ts);
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function clearEmpty() {
+    var e = output.querySelector('.empty');
+    if (e) e.remove();
+  }
+
+  /** Render text, turning detected file paths into clickable links. */
+  function renderText(el, text) {
+    var hits = [];
+    try { hits = api.findPaths(text) || []; } catch (e) { hits = []; }
+    if (!hits.length) { el.textContent = text; return; }
+
+    var pos = 0;
+    for (var i = 0; i < hits.length; i++) {
+      var h = hits[i];
+      if (h.index > pos) el.appendChild(document.createTextNode(text.slice(pos, h.index)));
+      var a = document.createElement('a');
+      a.className = 'path';
+      a.textContent = h.text;
+      a.title = '点击选择操作';
+      a.dataset.path = h.text;
+      el.appendChild(a);
+      pos = h.index + h.length;
+    }
+    if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
+  }
+
+  function appendLine(line) {
+    var atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
+    var div = document.createElement('div');
+    div.className = 'line ' + (line.stream === 'err' ? 'err' : 'out');
+
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = fmtTs(line.ts);
+    div.appendChild(ts);
+
+    var txt = document.createElement('span');
+    txt.className = 'txt';
+    renderText(txt, line.text);
+    div.appendChild(txt);
+
+    output.appendChild(div);
+    lineCount++;
+
+    if (lineCount > MAX_LINES) {
+      output.removeChild(output.firstChild);
+      lineCount--;
+    }
+    if (atBottom && autoScroll.checked) output.scrollTop = output.scrollHeight;
+  }
+
+  function flush() {
+    flushTimer = null;
+    if (!pending.length) return;
+    clearEmpty();
+    for (var i = 0; i < pending.length; i++) appendLine(pending[i]);
+    pending.length = 0;
+    if (autoScroll.checked) output.scrollTop = output.scrollHeight;
+  }
+
+  /** Batch incoming lines: a chatty agent would otherwise thrash the DOM. */
+  function schedule(line) {
+    pending.push(line);
+    if (flushTimer !== null) return;
+    flushTimer = setTimeout(flush, FLUSH_MS);
+  }
+
+  // ── data wiring ────────────────────────────────────────────────────────
+
+  api.getBackendHistory(300).then(function (lines) {
+    if (lines && lines.length) {
+      clearEmpty();
+      for (var i = 0; i < lines.length; i++) appendLine(lines[i]);
+      output.scrollTop = output.scrollHeight;
+    }
+  }).catch(function () { /* no history is fine */ });
+
+  api.onBackendLine(schedule);
+
+  // ── actions ────────────────────────────────────────────────────────────
+
+  var toastTimer = null;
+  function toast(msg, isErr) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = isErr ? 'err' : '';
+    t.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.style.display = 'none'; }, 4000);
+  }
+
+  document.getElementById('btn-clear').onclick = function () {
+    output.innerHTML = '<div class="empty">已清空（日志文件不受影响）</div>';
+    lineCount = 0;
+  };
+
+  document.getElementById('btn-logs').onclick = function () {
+    api.openLogs().then(function (r) { if (r && !r.ok) toast(r.error || '打开失败', true); });
+  };
+
+  var restartBtn = document.getElementById('btn-restart');
+  restartBtn.onclick = function () {
+    restartBtn.disabled = true;
+    restartBtn.textContent = '重启中…';
+    api.restartBackend().then(function (r) {
+      restartBtn.disabled = false;
+      restartBtn.textContent = '重启服务';
+      if (r && !r.ok) toast('重启失败：' + (r.error || '未知错误'), true);
+      else toast('后端已重启（令牌已刷新，主窗口将重新加载）');
+    });
+  };
+
+  // ── path context menu ──────────────────────────────────────────────────
+
+  var menu = document.getElementById('path-menu');
+  var menuPath = menu.querySelector('.path-text');
+  var currentPath = '';
+
+  output.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a.path') : null;
+    if (!a) return;
+    e.preventDefault();
+    currentPath = a.dataset.path || a.textContent;
+    menuPath.textContent = currentPath;
+    menu.style.display = 'block';
+    var r = a.getBoundingClientRect();
+    // Keep the menu inside the viewport.
+    var top = Math.min(r.bottom + 2, window.innerHeight - menu.offsetHeight - 4);
+    menu.style.top = Math.max(4, top) + 'px';
+    menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+  });
+
+  document.addEventListener('click', function (e) {
+    if (menu.style.display === 'block' && !menu.contains(e.target)) {
+      menu.style.display = 'none';
+    }
+  });
+
+  menu.addEventListener('click', function (e) {
+    var act = e.target && e.target.dataset ? e.target.dataset.act : null;
+    if (!act) return;
+    menu.style.display = 'none';
+    if (act === 'copy') {
+      navigator.clipboard.writeText(currentPath).then(
+        function () { toast('已复制路径'); },
+        function () { toast('复制失败', true); }
+      );
+    } else if (act === 'edit') {
+      api.openInEditor(currentPath).then(function (r) {
+        if (r && !r.ok) toast('打开失败：' + (r.error || '未知错误') + '（可在菜单→设置里更换编辑器）', true);
+      });
+    } else if (act === 'reveal') {
+      api.revealPath(currentPath).then(function (r) {
+        if (r && !r.ok) toast('无法显示：' + (r.error || '未知错误'), true);
+      });
+    }
+  });
+
+  // ── splitter (monitor height) ──────────────────────────────────────────
+
+  var splitter = document.getElementById('splitter');
+  var monitor = document.getElementById('monitor');
+  var MIN_H = 80;
+
+  splitter.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    splitter.classList.add('dragging');
+    var startY = e.clientY;
+    var startH = monitor.offsetHeight;
+
+    function onMove(ev) {
+      var delta = startY - ev.clientY;
+      var avail = document.getElementById('app').clientHeight - splitter.offsetHeight;
+      var h = Math.max(MIN_H, Math.min(avail - 60, startH + delta));
+      monitor.style.height = h + 'px';
+    }
+    function onUp() {
+      splitter.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      api.setMonitorHeight(monitor.offsetHeight);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // ── resizer (panel width, handled by the main process) ─────────────────
+
+  var resizer = document.getElementById('resizer');
+  resizer.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    resizer.classList.add('dragging');
+    var startX = e.clientX;
+
+    function onMove(ev) {
+      // Dragging left widens the panel; report the desired total width.
+      api.setPanelWidth(window.innerWidth + (startX - ev.clientX));
+    }
+    function onUp() {
+      resizer.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // ── restore saved geometry ─────────────────────────────────────────────
+
+  api.getPrefs().then(function (p) {
+    if (p && typeof p.monitorHeight === 'number' && p.monitorHeight > MIN_H) {
+      monitor.style.height = p.monitorHeight + 'px';
+    }
+  }).catch(function () { /* defaults are fine */ });
+})();
+</script>
+</body>
+</html>

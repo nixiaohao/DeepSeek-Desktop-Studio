@@ -51,10 +51,25 @@ export class Launcher {
   readonly sourceDir: string
   readonly runtimeSrc: RuntimeSource
 
+  /**
+   * Fired when the backend process exits. `code` is null when it was killed by
+   * a signal. Wired up by main.ts to drive the health monitor.
+   */
+  onExit: ((code: number | null) => void) | null = null
+
+  /**
+   * Fired when spawn() itself fails (ENOENT, EACCES, ...). The process never
+   * ran, which is a different — and more definitive — failure than exiting
+   * with a non-zero code.
+   */
+  onSpawnError: ((message: string) => void) | null = null
+
   private backendProcess: ChildProcess | null = null
   private currentVersion = '0.0.0'
   /** URL with auth token printed by `dsh web` (newer harness versions). */
   private serverUrl = ''
+  /** Port the current backend is listening on (see restart()). */
+  private currentPort = DEFAULT_PORT
 
   constructor(workspaceDir: string) {
     this.sourceDir = workspaceDir
@@ -77,6 +92,11 @@ export class Launcher {
   /** Get the current HEAD commit hash (short) */
   private getHeadCommit(): string {
     return this.runtimeSrc.currentCommit()
+  }
+
+  /** Port the running backend listens on; 3080 before the first launch. */
+  get port(): number {
+    return this.currentPort
   }
 
   /** Full version string: shellVer+commitHash */
@@ -117,6 +137,40 @@ export class Launcher {
     const readyUrl = await this.waitForServer(`http://127.0.0.1:${port}`, SERVER_TIMEOUT_MS)
 
     return { port, url: readyUrl, version: this.version, hadUpdate }
+  }
+
+  /**
+   * Restart ONLY the backend process, without touching the source tree.
+   *
+   * Used by the status bar's 重启服务 action when the agent has died or is
+   * spewing errors. Deliberately does not run an update check: a health
+   * recovery path must not go to the network and must not `git reset --hard`
+   * the workspace while the user may have work in progress.
+   *
+   * IMPORTANT FOR THE CALLER: the new process mints a NEW per-process token,
+   * so the returned URL replaces the one currently loaded. The main window
+   * MUST loadURL() it again or every request 401s into a white screen.
+   *
+   * A hard failure here is returned, not thrown: the user is looking at a
+   * status bar telling them the agent died, and they need the reason there.
+   */
+  async restart(reportProgress: ProgressFn = () => {}): Promise<{ ok: boolean; url: string; error?: string }> {
+    try {
+      this.shutdown()
+      killPort(DEFAULT_PORT)
+      const port = await findAvailablePort(DEFAULT_PORT)
+
+      reportProgress('重启后端服务...')
+      this.backendProcess = this.spawnDshWeb(port)
+
+      reportProgress('等待服务就绪...')
+      const url = await this.waitForServer(`http://127.0.0.1:${port}`, SERVER_TIMEOUT_MS)
+      return { ok: true, url }
+    } catch (err) {
+      const message = (err as Error).message
+      log('launcher', `restart failed: ${message}`)
+      return { ok: false, url: '', error: message }
+    }
   }
 
   /**
@@ -189,6 +243,7 @@ export class Launcher {
   private spawnDshWeb(port: number): ChildProcess {
     const { path: nodeBin, useElectron } = resolveNodeBin()
     const args = this.resolveCliArgs()
+    this.currentPort = port
 
     log('launcher', `Spawning dsh web: ${nodeBin} ${args.join(' ')} (electronNode=${useElectron})`)
 
@@ -212,7 +267,9 @@ export class Launcher {
     proc.stdout?.on('data', (data: Buffer) => {
       const chunk = data.toString()
       // The readiness URL carries a live credential; keep it out of backend.log.
-      appendChildOutput('backend', `[OUT] ${redactTokenInText(chunk)}`)
+      // appendChildOutput() redacts internally (and covers stderr too), so the
+      // raw chunk is safe to hand over here.
+      appendChildOutput('backend', `[OUT] ${chunk}`)
       // Newer harness versions emit `dsh web: http://host:port/?token=...`.
       // stdout arrives in arbitrary chunks: a naive regex on the buffer can
       // match a truncated token (e.g. the first chunk ends mid-token), which
@@ -235,8 +292,14 @@ export class Launcher {
       if (outBuf.length > 8192) outBuf = outBuf.slice(-8192)
     })
     proc.stderr?.on('data', (data: Buffer) => appendChildOutput('backend', `[ERR] ${data.toString()}`))
-    proc.on('exit', (code) => log('launcher', `Backend process exited with code ${code}`))
-    proc.on('error', (err) => log('launcher', `Backend process error: ${err.message}`))
+    proc.on('exit', (code) => {
+      log('launcher', `Backend process exited with code ${code}`)
+      this.onExit?.(code)
+    })
+    proc.on('error', (err) => {
+      log('launcher', `Backend process error: ${err.message}`)
+      this.onSpawnError?.(err.message)
+    })
     // Do NOT let the child handle keep the Electron main process alive:
     // without this, app.quit() can hang on the backend's stdio pipes and the
     // portable stub stays locked to the exe file.
@@ -374,7 +437,10 @@ export class Launcher {
       log('launcher', `Killing backend process tree (pid ${proc.pid})...`)
       try { killProcessTree(proc.pid) } catch { /* already dead */ }
     }
-    killPort(DEFAULT_PORT)
+    // Free the port the backend actually used, which is not necessarily
+    // DEFAULT_PORT when 3080 was already taken at launch time.
+    killPort(this.currentPort)
+    if (this.currentPort !== DEFAULT_PORT) killPort(DEFAULT_PORT)
   }
 }
 
@@ -400,14 +466,9 @@ function redactToken(url: string): string {
   }
 }
 
-/**
- * Mask `token=<value>` parameters in free-form child-process output before it
- * is appended to backend.log. The harness prints its authenticated URL there,
- * and that log is the one users send along with a bug report.
- */
-function redactTokenInText(text: string): string {
-  return text.replace(/(token=)[A-Za-z0-9_-]+/gu, '$1***')
-}
+// `redactTokenInText()` now lives in logging.ts and is applied inside
+// appendChildOutput(), so BOTH stdout and stderr are covered. Previously only
+// the stdout call site redacted it, leaving stderr raw.
 
 /** Find an available port starting from the given one */
 async function findAvailablePort(startPort: number): Promise<number> {
