@@ -296,3 +296,112 @@ export function parseBranch(raw: string): string {
   const line = (raw ?? '').split('\n')[0].trim()
   return line === '' || line === 'HEAD' ? '' : line
 }
+
+// ── tree flattening ──
+
+/** One rendered row of the file tree, already flattened and depth-tagged. */
+export interface TreeRow {
+  name: string
+  path: string
+  isDir: boolean
+  depth: number
+  /** Whether the row shows a disclosure triangle. */
+  expandable: boolean
+  /** Short git marker ('' when clean) — see gitStatusBadge. */
+  badge: string
+  /** Chinese git status label ('' when clean). */
+  status: string
+}
+
+/**
+ * Hard cap on rows returned to the renderer.
+ *
+ * A monorepo or a directory with a forgotten `node_modules` exclusion is
+ * thousands of rows per level; without a cap the IPC payload alone would stall
+ * the panel. Reaching the cap is reported so the UI can say so.
+ */
+export const MAX_TREE_ROWS = 2000
+/** Depth cap. Bounds the walk even if the filesystem has a symlink cycle. */
+export const MAX_TREE_DEPTH = 12
+
+export interface BuildTreeOptions {
+  /** Directory whose CHILDREN become the top-level rows. */
+  root: string
+  /** Read one directory level. Supplied by the caller so this stays pure. */
+  readDir: (dir: string) => DirEntry[]
+  /** Absolute paths whose children should be included. */
+  expanded: ReadonlySet<string>
+  /** Git status lookup by absolute path; omit when the dir is not a repo. */
+  statusFor?: (absPath: string) => GitStatusEntry | undefined
+  maxRows?: number
+  maxDepth?: number
+}
+
+export interface TreeResult {
+  rows: TreeRow[]
+  /** True when maxRows stopped the walk — the tree shown is incomplete. */
+  truncated: boolean
+}
+
+/**
+ * Make `path` relative to `root`, or return it unchanged when it is not
+ * underneath `root`.
+ *
+ * Needed because git reports status paths relative to the REPO root (which can
+ * sit above the directory the tree is showing), while the tree works in
+ * absolute paths. Without this every file would look clean whenever the repo
+ * root is not exactly the tree root.
+ */
+export function relativeTo(root: string, path: string): string {
+  if (!root || !path) return path
+  const r = norm(root)
+  const p = norm(path)
+  if (p === r) return ''
+  if (!p.startsWith(r + '/')) return path
+  return p.slice(r.length + 1)
+}
+
+/**
+ * Flatten the visible tree into rows, honouring the expanded set.
+ *
+ * The renderer gets a flat list and draws it; all the tree shape decisions
+ * live here where they can be tested. Recursion is bounded by maxDepth, and
+ * the row count by maxRows, so a pathological directory cannot hang the app.
+ */
+export function buildTreeRows(opts: BuildTreeOptions): TreeResult {
+  const maxRows = opts.maxRows ?? MAX_TREE_ROWS
+  const maxDepth = opts.maxDepth ?? MAX_TREE_DEPTH
+  const rows: TreeRow[] = []
+  let truncated = false
+
+  const walk = (dir: string, depth: number): void => {
+    if (depth > maxDepth) return
+    if (rows.length >= maxRows) {
+      truncated = true
+      return
+    }
+    for (const e of sortEntries(opts.readDir(dir))) {
+      if (rows.length >= maxRows) {
+        truncated = true
+        return
+      }
+      const entry = opts.statusFor?.(e.path)
+      rows.push({
+        name: e.name,
+        path: e.path,
+        isDir: e.isDir,
+        depth,
+        // Every directory gets a triangle. Deciding properly would mean
+        // reading one level deeper for every row, and an empty directory with a
+        // triangle is a far cheaper mistake than an eager recursive read.
+        expandable: e.isDir,
+        badge: entry ? gitStatusBadge(entry) : '',
+        status: entry ? gitStatusLabel(entry.code) : '',
+      })
+      if (e.isDir && opts.expanded.has(e.path)) walk(e.path, depth + 1)
+    }
+  }
+
+  walk(opts.root, 0)
+  return { rows, truncated }
+}

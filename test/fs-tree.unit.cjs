@@ -27,6 +27,9 @@ const {
   indexGitStatus,
   gitStatusFor,
   parseBranch,
+  relativeTo,
+  buildTreeRows,
+  MAX_TREE_ROWS,
 } = require(path.join(__dirname, '..', 'lib-new', 'fs-tree.js'))
 
 let pass = 0
@@ -44,6 +47,13 @@ function check(label, actual, expected) {
   }
 }
 const entry = (name, isDir) => ({ name, path: '/x/' + name, isDir, expandable: isDir })
+/** A DirEntry at a real parent path, for building fake directory listings. */
+const entry2 = (parent, name, isDir) => ({
+  name,
+  path: parent + '/' + name,
+  isDir,
+  expandable: isDir,
+})
 
 // ── ignore rules ──
 
@@ -259,6 +269,116 @@ check('a slash branch name survives', parseBranch('feature/panel\n'), 'feature/p
 check('detached HEAD is not a branch', parseBranch('HEAD\n'), '')
 check('empty output yields empty', parseBranch(''), '')
 check('whitespace-only output yields empty', parseBranch('   \n'), '')
+
+// ── repo-relative rebasing ──
+
+console.log('fs-tree: repo-relative paths')
+check('a nested file rebases', relativeTo('/repo', '/repo/src/a.ts'), 'src/a.ts')
+check('a deeper file rebases', relativeTo('/repo', '/repo/src/lib/b.ts'), 'src/lib/b.ts')
+check('the root itself rebases to empty', relativeTo('/repo', '/repo'), '')
+check(
+  'a path outside the root is returned unchanged',
+  relativeTo('/repo', '/elsewhere/a.ts'),
+  '/elsewhere/a.ts'
+)
+check(
+  'a sibling with a shared prefix is not rebased',
+  relativeTo('/repo', '/repo-2/a.ts'),
+  '/repo-2/a.ts'
+)
+check(
+  'windows paths rebase',
+  relativeTo('C:\\work\\repo', 'C:\\work\\repo\\src\\a.ts'),
+  'src/a.ts'
+)
+check('an empty root returns the path', relativeTo('', '/repo/a.ts'), '/repo/a.ts')
+
+// ── tree flattening ──
+
+console.log('fs-tree: tree flattening')
+{
+  // A tiny in-memory filesystem. Rows are addressed by absolute path so the
+  // shape mirrors what FileTree hands in.
+  const FS = {
+    '/r': [
+      entry2('/r', 'src', true),
+      entry2('/r', 'readme.md', false),
+    ],
+    '/r/src': [
+      entry2('/r/src', 'a.ts', false),
+      entry2('/r/src', 'b.ts', false),
+    ],
+  }
+  const readDir = (dir) => FS[dir] ?? []
+  const base = { root: '/r', readDir, expanded: new Set() }
+
+  check('a collapsed root lists only its children', buildTreeRows(base).rows.map((r) => r.name), [
+    'src',
+    'readme.md',
+  ])
+  check('top-level rows are depth 0', buildTreeRows(base).rows.map((r) => r.depth), [0, 0])
+  check(
+    'directories are marked expandable, files are not',
+    buildTreeRows(base).rows.map((r) => r.expandable),
+    [true, false]
+  )
+
+  const open = buildTreeRows({ ...base, expanded: new Set(['/r/src']) })
+  check('an expanded folder appends its children', open.rows.map((r) => r.name), [
+    'src',
+    'a.ts',
+    'b.ts',
+    'readme.md',
+  ])
+  check('children are indented one level', open.rows.map((r) => r.depth), [0, 1, 1, 0])
+
+  check(
+    'an empty directory contributes no rows',
+    buildTreeRows({ root: '/r', readDir: () => [], expanded: new Set() }).rows.length,
+    0
+  )
+}
+{
+  // Git badges must reach the rows, keyed through the repo root.
+  const FS = { '/repo': [entry2('/repo', 'src', true)], '/repo/src': [entry2('/repo/src', 'a.ts', false)] }
+  const index = indexGitStatus(parsePorcelainZ(' M src/a.ts\0'))
+  const res = buildTreeRows({
+    root: '/repo',
+    readDir: (d) => FS[d] ?? [],
+    expanded: new Set(['/repo/src']),
+    statusFor: (p) => gitStatusFor(index, relativeTo('/repo', p)),
+  })
+  check('a dirty file gets a badge', res.rows[1].badge, 'M')
+  check('a dirty file gets a label', res.rows[1].status, '已修改')
+  check('a clean directory has no badge', res.rows[0].badge, '')
+}
+{
+  // Depth and row caps: without them a symlink cycle or a forgotten
+  // node_modules turns the panel into a hang.
+  const deep = {}
+  let p = '/x'
+  for (let i = 0; i < 40; i++) {
+    deep[p] = [entry2(p, 'd' + i, true)]
+    p = p + '/d' + i
+  }
+  deep[p] = []
+  const res = buildTreeRows({
+    root: '/x',
+    readDir: (d) => deep[d] ?? [],
+    expanded: new Set(Object.keys(deep)),
+    maxDepth: 3,
+  })
+  check('depth is capped', Math.max(...res.rows.map((r) => r.depth)) <= 3, true)
+
+  const wide = { '/w': Array.from({ length: 50 }, (_, i) => entry2('/w', 'f' + i, false)) }
+  const capped = buildTreeRows({ root: '/w', readDir: (d) => wide[d] ?? [], expanded: new Set(), maxRows: 10 })
+  check('row count is capped', capped.rows.length, 10)
+  check('being capped is reported', capped.truncated, true)
+
+  const notCapped = buildTreeRows({ root: '/w', readDir: (d) => wide[d] ?? [], expanded: new Set(), maxRows: 100 })
+  check('under the cap nothing is truncated', notCapped.truncated, false)
+  check('the default cap is generous', MAX_TREE_ROWS >= 1000, true)
+}
 
 console.log(`\nfs-tree: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)
