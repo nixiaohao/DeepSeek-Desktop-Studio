@@ -141,7 +141,54 @@ for (const ch of handled) {
   )
 }
 
-// ── 3. Every health phase must have a Chinese label ──
+// ── 3. The CSP must actually permit the inline scripts ──
+
+console.log('panel-api: CSP vs inline scripts')
+
+/**
+ * An inline <script> under `script-src 'self'` is dropped by Chromium with no
+ * user-visible error: the page renders, the buttons look fine, and nothing
+ * works. That was the state of both overlays when this check was written.
+ *
+ * External .js files were considered instead of 'unsafe-inline', but 'self'
+ * matching for sibling file:// URLs is not dependable, and a script that fails
+ * to load fails identically silently. `default-src 'none'` still blocks every
+ * remote load, so the exposure here is limited to code that ships with the app.
+ */
+for (const asset of HTML_ASSETS) {
+  const html = read(asset)
+  // Two passes, not one character class: the content itself contains single
+  // quotes ('none'), so a ["']-delimited capture stops at the first directive.
+  const csp =
+    /<meta[^>]+Content-Security-Policy[^>]+content="([^"]*)"/i.exec(html) ||
+    /<meta[^>]+Content-Security-Policy[^>]+content='([^']*)'/i.exec(html)
+  if (!csp) {
+    bad(`${asset} declares a CSP`, 'no Content-Security-Policy meta tag found')
+    continue
+  }
+  const directives = csp[1]
+  const inlineScript = /<script(?![^>]*\ssrc=)[^>]*>[\s\S]*?<\/script>/i.test(html)
+  const scriptSrc = /script-src\s+([^;]+)/.exec(directives)
+
+  if (inlineScript) {
+    assert(
+      scriptSrc !== null && /'unsafe-inline'|'nonce-|'sha256-|'sha384-|'sha512-/.test(scriptSrc[1]),
+      `${asset}: CSP allows its inline script`,
+      `${asset} has an inline <script> but script-src is "${scriptSrc ? scriptSrc[1].trim() : 'absent'}" — Chromium will drop the script and the page will be inert`
+    )
+  } else {
+    ok(`${asset} has no inline script (CSP need not allow one)`)
+  }
+
+  // The point of the policy: nothing may be fetched from anywhere.
+  assert(
+    /default-src\s+'none'/.test(directives),
+    `${asset}: default-src is 'none'`,
+    `${asset} should default-deny every remote load; got "${directives}"`
+  )
+}
+
+// ── 4. Every health phase must have a Chinese label ──
 
 console.log('panel-api: health phase labels')
 

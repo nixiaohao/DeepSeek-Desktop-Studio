@@ -99,6 +99,18 @@ export class Launcher {
     return this.currentPort
   }
 
+  /**
+   * The backend URL as printed by `dsh web`, token included when the running
+   * harness mints one ('' before the first successful launch).
+   *
+   * NEVER log or persist this value — the token is the only thing standing
+   * between a local page and the agent's session. Pass it through
+   * `redactToken()` before it reaches any log, dialog, or IPC payload.
+   */
+  get url(): string {
+    return this.serverUrl
+  }
+
   /** Full version string: shellVer+commitHash */
   get version(): string {
     return `${this.currentVersion}+${this.getHeadCommit()}`

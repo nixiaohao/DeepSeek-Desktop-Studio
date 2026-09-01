@@ -58,6 +58,38 @@ contextBridge.exposeInMainWorld('dshPanel', {
   getStatusInfo: (): Promise<{ version: string; port: number | null; channel: string } | null> =>
     ipcRenderer.invoke('panel:status-info'),
 
+  // ── change review (dsh mux stream) ──
+
+  /**
+   * Fires when the change list or the approval inbox changed.
+   *
+   * Carries no payload: the panel re-reads `getChanges()` on its own schedule,
+   * which keeps one throttle instead of one per event source.
+   */
+  onChangesChanged: (cb: () => void): void => {
+    ipcRenderer.on('panel:changes-rev', () => cb())
+  },
+  offChangesChanged: (cb: (...args: unknown[]) => void): void => off('panel:changes-rev', cb),
+
+  /** Changes, pending approvals and sessions in one call. */
+  getChanges: (): Promise<{
+    changes: unknown[]
+    approvals: unknown[]
+    sessions: unknown[]
+    connected: boolean
+  }> => ipcRenderer.invoke('panel:changes-now'),
+
+  /**
+   * Allow or reject one pending approval.
+   * `outcome` is deliberately restricted to the two values a client may give;
+   * cancelled/unavailable are host-side outcomes.
+   */
+  respondApproval: (
+    approvalId: string,
+    outcome: 'allowed-once' | 'rejected'
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('panel:respond', approvalId, outcome),
+
   // ── actions ──
 
   /** Restart only the backend process (a fresh token is minted — see main.ts). */

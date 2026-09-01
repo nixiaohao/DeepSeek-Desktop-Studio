@@ -19,10 +19,17 @@ import { savePreferences, loadPanelPrefs, savePanelPrefs, loadExternalEditor } f
 import { openInEditor } from './external-editor.js'
 import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
+import type { DshStream, ApprovalOutcome } from './dsh-stream.js'
 
 export interface IpcDeps {
   getWindowManager: () => WindowManager | null
   getHealthMonitor: () => HealthMonitor | null
+  /**
+   * The mux stream, or null before the first successful launch. Every channel
+   * below degrades to an empty result rather than failing, because `/api/*`
+   * carries no version promise upstream.
+   */
+  getStream: () => DshStream | null
   getAppVersion: () => string
   /**
    * Restart the backend process only. The caller (main.ts) must reload the
@@ -102,6 +109,31 @@ export function registerIpc(deps: IpcDeps): () => void {
     }
   })
 
+  // ── Panel: change review (dsh mux stream) ──
+
+  ipcMain.handle('panel:changes-now', () => {
+    const stream = deps.getStream()
+    return stream
+      ? stream.panelSnapshot()
+      : { changes: [], approvals: [], sessions: [], dropped: 0, connected: false }
+  })
+
+  ipcMain.handle('panel:respond', async (_e, approvalId: unknown, outcome: unknown) => {
+    if (typeof approvalId !== 'string' || approvalId.length === 0) {
+      return { ok: false, error: '缺少 approvalId' }
+    }
+    if (outcome !== 'allowed-once' && outcome !== 'rejected') {
+      return { ok: false, error: `未知的审批结果：${String(outcome)}` }
+    }
+    const stream = deps.getStream()
+    if (!stream) return { ok: false, error: '变更流尚未连接' }
+    try {
+      return await stream.respond(approvalId, outcome as ApprovalOutcome)
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
   // ── Panel: actions ──
 
   ipcMain.handle('panel:restart-backend', () => deps.restartBackend())
@@ -158,6 +190,17 @@ export function registerIpc(deps: IpcDeps): () => void {
     getHealthMonitor()?.feedLine(line)
   })
 
+  // Change review is push-notified but pull-loaded. A payload-less revision
+  // bump keeps the broadcast cheap (diffs carry whole file contents, and a
+  // chatty agent would otherwise ship megabytes per second over IPC), while the
+  // panel's own 100ms batching stays the single throttle point.
+  let revision = 0
+  const stream = deps.getStream()
+  stream?.setOnChange(() => {
+    revision += 1
+    broadcast(getWindowManager(), 'panel:changes-rev', revision)
+  })
+
   // Health has no feed of its own: the monitor emits on change, and a ticker
   // keeps time-dependent states (idle/degraded) fresh even when output is
   // quiet — otherwise a silent backend would never leave `ready`.
@@ -175,6 +218,7 @@ export function registerIpc(deps: IpcDeps): () => void {
   return () => {
     unsubBackend()
     unsubHealth?.()
+    stream?.setOnChange(undefined)
     clearInterval(ticker)
   }
 }

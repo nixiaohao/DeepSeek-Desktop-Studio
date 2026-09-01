@@ -26,11 +26,12 @@ import { setupMenu, type MenuActions } from './menu.js'
 import { resolveWorkspace } from './workspace.js'
 import { loadPackagedIcon } from './icons.js'
 import { runWizard } from './wizard.js'
-import { log, getLogDir, isDebug } from './logging.js'
+import { log, getLogDir, isDebug, redactTokenInText } from './logging.js'
 import { relaunchApp } from './relaunch.js'
 import { WindowManager } from './window-manager.js'
 import { HealthMonitor } from './health-monitor.js'
 import { registerIpc } from './ipc-registry.js'
+import { DshStream } from './dsh-stream.js'
 import { describeEditorConfig, pickEditorInteractively } from './external-editor.js'
 
 // ── Startup hardening (must run before app ready) ──
@@ -90,6 +91,13 @@ let launcher: Launcher | null = null
 let windowManager: WindowManager | null = null
 /** Backend health state machine, fed by the backend output subscription. */
 let healthMonitor: HealthMonitor | null = null
+/**
+ * The dsh mux event stream (change review).
+ *
+ * Created before registerIpc() so the IPC layer can install its broadcast
+ * callback; started only once a backend URL exists.
+ */
+let dshStream: DshStream | null = null
 /** Unsubscribes the IPC feeds. Must run on window close / quit. */
 let teardownIpc: (() => void) | null = null
 
@@ -185,6 +193,7 @@ function createMainWindow(url: string): BrowserWindow {
     // lifetime of the process.
     teardownIpc?.()
     teardownIpc = null
+    dshStream?.stop()
     windowManager?.destroy()
     windowManager = null
     launcher?.shutdown()
@@ -224,6 +233,9 @@ async function restartBackend(): Promise<{ ok: boolean; error?: string }> {
   restarting = true
   log('launcher', 'restartBackend: restarting dsh web on user request')
   healthMonitor?.noteRestart()
+  // The old connection is pointed at a process that is about to die; letting it
+  // retry in the background would race the new backend for the port.
+  dshStream?.stop()
 
   try {
     const result = await launcher.restart((msg) => log('launcher', `[restart] ${msg}`))
@@ -245,6 +257,9 @@ async function restartBackend(): Promise<{ ok: boolean; error?: string }> {
     }
 
     healthMonitor?.noteReady()
+    // New process, new token, new sessions: start() sees the changed URL and
+    // resets the store, so no stale approval survives the restart.
+    dshStream?.start(result.url)
     log('launcher', 'restartBackend: done')
     return { ok: true }
   } finally {
@@ -279,6 +294,9 @@ function quitApp(): void {
   log('launcher', 'quitApp: tearing down...')
   teardownIpc?.()
   teardownIpc = null
+  // Close the SSE connection before the backend dies: otherwise the reader loop
+  // sees an ECONNRESET and schedules a reconnect that outlives the shutdown.
+  dshStream?.stop()
   try {
     windowManager?.destroy()
   } catch { /* window already gone */ }
@@ -749,11 +767,19 @@ function buildMenuActions(): MenuActions {
 app.whenReady().then(async () => {
   healthMonitor = new HealthMonitor()
 
+  // The stream holds the tokenized backend URL, so its log lines pass through
+  // redaction even though the stream itself only ever logs the origin: a future
+  // message that interpolates the full URL must not become a token leak.
+  dshStream = new DshStream({
+    log: (message) => log('launcher', `[mux] ${redactTokenInText(message)}`),
+  })
+
   // All IPC lives in ipc-registry.ts now. main.ts had grown past 700 lines and
   // every new panel action meant touching it.
   teardownIpc = registerIpc({
     getWindowManager: () => windowManager,
     getHealthMonitor: () => healthMonitor,
+    getStream: () => dshStream,
     getAppVersion: () => launcher?.version ?? app.getVersion(),
     restartBackend,
     getStatusInfo: statusInfo,
@@ -829,6 +855,11 @@ app.whenReady().then(async () => {
       log('launcher', `backend ready on port ${result.port}`)
       mainWindow = createMainWindow(result.url)
       createTray(mainWindow, launcher!, quitApp)
+
+      // Change review. Started after the window exists so its first snapshot
+      // reaches a panel that is already listening; it fails soft, so a backend
+      // without /api/events.mux costs the change list and nothing else.
+      dshStream?.start(result.url)
 
       // Plugin market: ask once, install on request, stream progress into a
       // dedicated window, and report the outcome (success → restart to load;

@@ -2,8 +2,21 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
+<!--
+  CSP: `default-src 'none'` blocks every remote load — no images, no fonts, no
+  XHR, no frames — so the page can only ever run what ships with the app.
+
+  `script-src` needs 'unsafe-inline' because the logic lives in an inline
+  <script> below. Without it Chromium blocks the inline script outright and the
+  panel renders as a dead, static page: buttons that look fine and do nothing,
+  with no console error the user would ever see. Keeping the script external
+  was rejected as the alternative: 'self' matching for sibling file:// URLs is
+  not dependable, and a script that fails to load produces the identical
+  silent-dead-panel failure. The real isolation boundary here is the preload
+  and contextIsolation, not this header.
+-->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline';" />
+      content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline';" />
 <title>面板</title>
 <style>
   :root {
@@ -50,12 +63,58 @@
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
 
-  /* ── Changes area (placeholder until phase 2 wires the diff feed) ── */
+  /* ── Changes area ── */
   #changes { flex: 1 1 auto; min-height: 80px; }
   #changes .body {
-    flex: 1; overflow: auto; padding: 10px; color: var(--fg-dim); font-size: 11px;
+    flex: 1; overflow: auto; padding: 6px; color: var(--fg-dim); font-size: 11px;
     user-select: text;
   }
+
+  /* A pending approval outranks the change list: it is the only thing that
+     actually blocks the agent. */
+  .approval {
+    border: 1px solid var(--warn); border-radius: 4px; margin-bottom: 6px;
+    background: rgba(255,180,84,.07);
+  }
+  .approval .head {
+    display: flex; align-items: center; gap: 6px; padding: 5px 7px;
+    border-bottom: 1px solid var(--border);
+  }
+  .approval .head .tool { color: var(--warn); font-weight: 600; }
+  .approval .head .spacer { flex: 1; }
+  .approval .reason { padding: 4px 7px; color: var(--fg-dim); font-size: 10px; }
+  .approval .files { padding: 0 7px 4px; }
+  .approval .acts { display: flex; gap: 6px; padding: 0 7px 6px; }
+  .approval .acts button { flex: 1; }
+  .approval .acts button.allow { border-color: var(--ok); color: var(--ok); }
+  .approval .acts button.allow:hover { background: var(--ok); color: #10221a; }
+  .approval .acts button.deny { border-color: var(--err); color: var(--err); }
+  .approval .acts button.deny:hover { background: var(--err); color: #2a1414; }
+
+  .chg { border-bottom: 1px solid var(--border); }
+  .chg:last-child { border-bottom: none; }
+  .chg .row {
+    display: flex; align-items: center; gap: 6px; padding: 4px 6px; cursor: pointer;
+  }
+  .chg .row:hover { background: rgba(76,141,255,.08); }
+  .chg .dot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+  .chg.pending .dot { background: var(--warn); }
+  .chg.applied .dot { background: var(--ok); }
+  .chg.rejected .dot { background: var(--err); }
+  .chg .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chg.applied .title, .chg.rejected .title { opacity: .75; }
+  .chg .delta { flex: none; font-size: 10px; }
+  .chg .delta .add { color: var(--ok); }
+  .chg .delta .del { color: var(--err); }
+  .chg .detail { padding: 0 6px 6px 18px; display: none; }
+  .chg.open .detail { display: block; }
+  .chg .detail pre {
+    margin-top: 4px; padding: 4px 6px; background: #101319; border: 1px solid var(--border);
+    border-radius: 3px; max-height: 200px; overflow: auto; white-space: pre-wrap;
+    word-break: break-all; font-size: 10px; color: var(--out);
+  }
+  .chg .detail .note { color: #5d6377; font-size: 10px; }
+  .chg .detail .tools { display: flex; gap: 6px; margin-top: 4px; }
 
   #splitter {
     flex: none; height: 5px; cursor: ns-resize; background: var(--bg-2);
@@ -115,13 +174,10 @@
       <header>
         <span class="title">变更审阅</span>
         <span class="spacer"></span>
-        <span class="hint">阶段二接入</span>
+        <span class="hint" id="chg-status">未连接</span>
       </header>
-      <div class="body">
-        这里将展示 agent 的变更（先看 diff → 批准 → 才执行）。<br /><br />
-        数据 dsh 已就绪（DiffCallView 在工具执行前就产出 oldText/newText），
-        本壳只需接 SSE 的审批帧即可，无需上游改动。<br /><br />
-        当前阶段先交付下方的运行监控。
+      <div class="body" id="changes-body">
+        <div class="empty">等待 agent 的变更事件…</div>
       </div>
     </section>
 
@@ -287,6 +343,205 @@
       else toast('后端已重启（令牌已刷新，主窗口将重新加载）');
     });
   };
+
+  // ── change review (dsh mux stream) ─────────────────────────────────────
+
+  var changesBody = document.getElementById('changes-body');
+  var chgStatus = document.getElementById('chg-status');
+  var PREVIEW_LINES = 100;
+  var chgTimer = null;
+
+  /**
+   * Cheap +/- count from a bag-of-lines comparison.
+   *
+   * Not a real diff: FileDiff carries whole file bodies, and an LCS over a
+   * 5k-line file is not worth it for a header badge. Order-insensitive, so a
+   * pure reorder reads as no change — acceptable for "how big is this".
+   */
+  function deltaOf(d) {
+    var newLines = String(d && d.newText ? d.newText : '').split('\n');
+    if (!d || d.oldText === null || d.oldText === undefined) {
+      return { add: newLines.length, del: 0 };
+    }
+    var bag = {};
+    var oldLines = String(d.oldText).split('\n');
+    for (var i = 0; i < oldLines.length; i++) {
+      bag[oldLines[i]] = (bag[oldLines[i]] || 0) + 1;
+    }
+    var add = 0;
+    for (var j = 0; j < newLines.length; j++) {
+      if (bag[newLines[j]] > 0) bag[newLines[j]] -= 1;
+      else add += 1;
+    }
+    var del = 0;
+    for (var k in bag) { if (Object.prototype.hasOwnProperty.call(bag, k)) del += bag[k]; }
+    return { add: add, del: del };
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  /** Build one change card. Paths are real, so they stay clickable. */
+  function changeNode(c) {
+    var wrap = el('div', 'chg ' + c.status);
+
+    var row = el('div', 'row');
+    row.appendChild(el('span', 'dot'));
+    row.appendChild(el('span', 'title', c.title || c.toolName || '变更'));
+
+    var add = 0;
+    var del = 0;
+    for (var i = 0; i < c.diffs.length; i++) {
+      var d = deltaOf(c.diffs[i]);
+      add += d.add;
+      del += d.del;
+    }
+    var delta = el('span', 'delta');
+    delta.appendChild(el('span', 'add', '+' + add));
+    delta.appendChild(document.createTextNode(' '));
+    delta.appendChild(el('span', 'del', '-' + del));
+    row.appendChild(delta);
+    wrap.appendChild(row);
+
+    var detail = el('div', 'detail');
+    for (var f = 0; f < c.diffs.length; f++) {
+      var diff = c.diffs[f];
+      var head = el('div', '', diff.path);
+      head.style.color = 'var(--accent)';
+      head.style.cursor = 'pointer';
+      head.title = '用外部编辑器打开';
+      /* eslint-disable no-loop-func */
+      (function (p) {
+        head.onclick = function (ev) {
+          ev.stopPropagation();
+          api.openInEditor(p).then(function (r) {
+            if (r && !r.ok) toast('打开失败：' + (r.error || '未知错误'), true);
+          });
+        };
+      })(diff.path);
+      detail.appendChild(head);
+
+      var body = diff.oldText === null || diff.oldText === undefined
+        ? String(diff.newText || '')
+        : String(diff.newText || '');
+      var lines = body.split('\n');
+      var shown = lines.slice(0, PREVIEW_LINES).join('\n');
+      var pre = el('pre', '', shown);
+      detail.appendChild(pre);
+      if (lines.length > PREVIEW_LINES) {
+        detail.appendChild(el('div', 'note',
+          '（预览已截断，共 ' + lines.length + ' 行；完整内容请在编辑器中查看）'));
+      }
+      if (diff.oldText === null || diff.oldText === undefined) {
+        detail.appendChild(el('div', 'note', '新建文件'));
+      }
+    }
+    wrap.appendChild(detail);
+
+    row.onclick = function () {
+      wrap.classList.toggle('open');
+    };
+    return wrap;
+  }
+
+  /** Build one approval card, joining back to the call it is asking about. */
+  function approvalNode(a, changes) {
+    var wrap = el('div', 'approval');
+
+    var head = el('div', 'head');
+    head.appendChild(el('span', 'tool', a.toolName || '工具'));
+    head.appendChild(el('span', '', '请求授权'));
+    head.appendChild(el('span', 'spacer'));
+    head.appendChild(el('span', 'note', new Date(a.ts).toLocaleTimeString()));
+    wrap.appendChild(head);
+
+    if (a.reason) wrap.appendChild(el('div', 'reason', a.reason));
+
+    // The approval frame carries no diff — the callId is the only way back to
+    // "what exactly is it asking to write", so look the call up here.
+    var related = null;
+    if (a.callId) {
+      for (var i = 0; i < changes.length; i++) {
+        if (changes[i].callId === a.callId) { related = changes[i]; break; }
+      }
+    }
+
+    var files = el('div', 'files');
+    if (related && related.diffs.length) {
+      for (var f = 0; f < related.diffs.length; f++) {
+        files.appendChild(el('div', '', related.diffs[f].path));
+      }
+    } else {
+      files.appendChild(el('div', 'note', '（该调用未提供文件差异）'));
+    }
+    wrap.appendChild(files);
+
+    var acts = el('div', 'acts');
+    var allow = el('button', 'allow', '允许一次');
+    var deny = el('button', 'deny', '拒绝');
+
+    function answer(outcome) {
+      allow.disabled = true;
+      deny.disabled = true;
+      api.respondApproval(a.approvalId, outcome).then(function (r) {
+        if (r && !r.ok) {
+          allow.disabled = false;
+          deny.disabled = false;
+          toast('审批失败：' + (r.error || '未知错误'), true);
+        } else {
+          toast(outcome === 'rejected' ? '已拒绝' : '已允许');
+        }
+      });
+    }
+    allow.onclick = function (e) { e.stopPropagation(); answer('allowed-once'); };
+    deny.onclick = function (e) { e.stopPropagation(); answer('rejected'); };
+    acts.appendChild(allow);
+    acts.appendChild(deny);
+    wrap.appendChild(acts);
+    return wrap;
+  }
+
+  function renderChanges(snap) {
+    if (!snap) return;
+    var changes = snap.changes || [];
+    var approvals = snap.approvals || [];
+
+    chgStatus.textContent = snap.connected
+      ? '已连接 · ' + changes.length + ' 项变更'
+      : '未连接（变更流未建立）';
+
+    changesBody.textContent = '';
+
+    if (!approvals.length && !changes.length) {
+      changesBody.appendChild(el('div', 'empty', snap.connected
+        ? '暂无变更。agent 修改文件时会出现在这里。'
+        : '尚未连接到 dsh 事件流。运行监控不受影响。'));
+      return;
+    }
+
+    for (var i = 0; i < approvals.length; i++) {
+      changesBody.appendChild(approvalNode(approvals[i], changes));
+    }
+    for (var j = 0; j < changes.length; j++) {
+      changesBody.appendChild(changeNode(changes[j]));
+    }
+  }
+
+  /** Pull on a throttle: the main process pushes only a revision bump. */
+  function scheduleChanges() {
+    if (chgTimer !== null) return;
+    chgTimer = setTimeout(function () {
+      chgTimer = null;
+      api.getChanges().then(renderChanges).catch(function () { /* stream not up */ });
+    }, 120);
+  }
+
+  api.onChangesChanged(scheduleChanges);
+  scheduleChanges();
 
   // ── path context menu ──────────────────────────────────────────────────
 
