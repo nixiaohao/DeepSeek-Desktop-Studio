@@ -26,7 +26,8 @@ import { subscribeBackend, getBackendLines, getLogDir, getRecentLines, log, subs
 import type { BackendLine } from './logging.js'
 import { buildView, entryFromBackend, entryFromAgent, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
 import type { LogEntry } from './log-model.js'
-import { aggregateStats, aggregateOverview, formatStatsSummary, type StatsSessionRow, type OverviewSessionRow } from './stats-model.js'
+import { aggregateStats, aggregateOverview, formatStatsSummary, formatCostSummary, estimateCost, pickPrice, parsePriceOverrides, BUILTIN_PRICES, type StatsSessionRow, type OverviewSessionRow, type CostSummary } from './stats-model.js'
+import { loadPriceOverridesText } from './preferences.js'
 import { filterCommands } from './command-model.js'
 import { buildCommandList, dispatchCommand, type CommandSource } from './command-registry.js'
 import { hideCommandPalette } from './command-palette-window.js'
@@ -1165,6 +1166,35 @@ export function registerIpc(deps: IpcDeps): () => void {
       }
     })
   }
+  // Overview rows carry the real session fields (the earlier draft zeroed
+  // running/updatedAt here — the store's snapshot already knows them).
+  const overviewRows = (): OverviewSessionRow[] => {
+    const store = deps.getStream?.()?.store
+    if (!store) return []
+    const snap = store.snapshot()
+    const bySession = new Map<string, Record<string, unknown>>()
+    for (const p of store.projectionEntries()) {
+      const row = bySession.get(p.sessionId) ?? {}
+      if (p.key === 'sessionStats') row.stats = p.value
+      else if (p.key === 'tokenUsage') row.usage = p.value
+      else if (p.key === 'contextPressure') row.contextPressure = p.value
+      else if (p.key === 'contextBreakdown') row.contextBreakdown = p.value
+      bySession.set(p.sessionId, row)
+    }
+    return snap.sessions.map((s) => {
+      const extra = bySession.get(s.sessionId)
+      return {
+        sessionId: s.sessionId,
+        parentSessionId: s.parentSessionId,
+        running: s.running,
+        agentPreset: s.agentPreset,
+        usage: extra?.usage as OverviewSessionRow['usage'],
+        contextPressure: extra?.contextPressure as OverviewSessionRow['contextPressure'],
+        contextBreakdown: extra?.contextBreakdown as OverviewSessionRow['contextBreakdown'],
+      }
+    })
+  }
+
   const pushStatsIfChanged = (): void => {
     const line = formatStatsSummary(aggregateStats(statsRows()))
     if (line === lastStatsLine) return
@@ -1180,35 +1210,80 @@ export function registerIpc(deps: IpcDeps): () => void {
   ipcMain.handle('panel:stats-now', () => formatStatsSummary(aggregateStats(statsRows())))
 
   /**
+   * The status bar's cost segment (命中率 + 估算 ¥). The estimate uses the
+   * user's model-prices.json overrides on top of the built-in DeepSeek
+   * prices; sessions whose preset matches no entry are counted in
+   * `unmatched` and NOT billed at a guessed price.
+   */
+  const buildCostSummary = (): CostSummary => {
+    const entries = [
+      ...parsePriceOverrides(loadPriceOverridesText()),
+      ...BUILTIN_PRICES,
+    ]
+    let cost = 0
+    let matched = false
+    let matchedName: string | null = null
+    let unmatched = 0
+    let hitNum = 0
+    let hitDen = 0
+    for (const row of overviewRows()) {
+      if (row.parentSessionId) continue // 子 agent 的 token 已含在主会话账单的输入里
+      const u = row.usage
+      if (u && typeof u === 'object') {
+        const read = typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : 0
+        const unc = typeof u.uncachedInputTokens === 'number' ? u.uncachedInputTokens : 0
+        hitNum += read
+        hitDen += read + unc
+      }
+      const price = pickPrice(entries, row.agentPreset)
+      if (!price) {
+        if (u && typeof u === 'object' &&
+          ((u.cacheReadTokens ?? 0) !== 0 || (u.uncachedInputTokens ?? 0) !== 0 ||
+            (u.outputTokens ?? 0) !== 0 || (u.cacheWriteTokens ?? 0) !== 0)) {
+          unmatched += 1
+        }
+        continue
+      }
+      matched = true
+      if (matchedName === null && price.model !== '*') matchedName = price.model
+      cost += estimateCost(
+        {
+          uncachedInput: u && typeof u === 'object' ? u.uncachedInputTokens : undefined,
+          output: u && typeof u === 'object' ? u.outputTokens : undefined,
+          cacheRead: u && typeof u === 'object' ? u.cacheReadTokens : undefined,
+          cacheWrite: u && typeof u === 'object' ? u.cacheWriteTokens : undefined,
+        },
+        price,
+      )
+    }
+    return {
+      hitRate: hitDen > 0 ? Math.round((hitNum / hitDen) * 1000) / 10 : null,
+      cost: matched ? Math.round(cost * 100) / 100 : null,
+      matched: matched ? (matchedName ?? '*') : null,
+      unmatched,
+    }
+  }
+  let lastCostLine: string | null = null
+  const pushCostIfChanged = (): void => {
+    const line = formatCostSummary(buildCostSummary())
+    if (line === lastCostLine) return
+    lastCostLine = line
+    const view = getWindowManager()?.statusBar ?? null
+    if (!view || view.webContents.isDestroyed()) return
+    try {
+      view.webContents.send('panel:cost', line)
+    } catch { /* view destroyed mid-send */ }
+  }
+  ipcMain.handle('panel:cost-now', () => formatCostSummary(buildCostSummary()))
+
+  /**
    * Session-overview aggregation for the panel's 概览 tab.
    *
    * Same projection rows as the stats segment, plus the context keys the
    * event-store now keeps; the arithmetic lives in stats-model.ts (pure,
    * unit-tested), this only decides which sessions contribute.
+   * (Implementation lives with statsRows above — one definition.)
    */
-  const overviewRows = (): OverviewSessionRow[] => {
-    const store = deps.getStream?.()?.store
-    if (!store) return []
-    const snap = store.snapshot()
-    const bySession = new Map<string, Record<string, unknown>>()
-    for (const p of store.projectionEntries()) {
-      const row = bySession.get(p.sessionId) ?? {}
-      if (p.key === 'sessionStats') row.stats = p.value
-      else if (p.key === 'tokenUsage') row.usage = p.value
-      else if (p.key === 'contextPressure') row.contextPressure = p.value
-      else if (p.key === 'contextBreakdown') row.contextBreakdown = p.value
-      bySession.set(p.sessionId, row)
-    }
-    return [...bySession.entries()].map(([sessionId, row]) => ({
-      sessionId,
-      parentSessionId: undefined,
-      running: false,
-      usage: row.usage as OverviewSessionRow['usage'],
-      contextPressure: row.contextPressure as OverviewSessionRow['contextPressure'],
-      contextBreakdown: row.contextBreakdown as OverviewSessionRow['contextBreakdown'],
-    }))
-  }
-
   ipcMain.handle('panel:overview-now', () => aggregateOverview(overviewRows()))
 
   const stream = deps.getStream?.() ?? null
@@ -1221,6 +1296,7 @@ export function registerIpc(deps: IpcDeps): () => void {
     // dedup/throttle so a burst of frames costs one recompute, not N sends.
     pushNewActivity()
     pushStatsIfChanged()
+    pushCostIfChanged()
 
     // System notification for each NEW pending approval. dsh already shows its
     // own modal inside the webview; the OS toast makes sure the user notices

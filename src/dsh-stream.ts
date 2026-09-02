@@ -347,7 +347,12 @@ export class DshStream {
           typeof item.parentSessionId === 'string' && item.parentSessionId.length > 0
             ? item.parentSessionId
             : undefined,
-        origin: typeof item.origin === 'string' ? item.origin : undefined,
+        origin: typeof item.origin === 'string' && item.origin.length > 0
+          ? item.origin
+          : undefined,
+        agentPreset: typeof item.agentPreset === 'string' && item.agentPreset.length > 0
+          ? item.agentPreset
+          : undefined,
       })
     }
   }

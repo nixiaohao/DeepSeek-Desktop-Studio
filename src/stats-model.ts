@@ -176,6 +176,8 @@ export interface OverviewSessionRow {
   sessionId?: string
   parentSessionId?: string
   running?: boolean
+  /** Preset name — the price table's match key for the cost estimate. */
+  agentPreset?: string
   usage?: {
     uncachedInputTokens?: number
     outputTokens?: number
@@ -267,4 +269,137 @@ export function aggregateOverview(rows: readonly OverviewSessionRow[]): Aggregat
     tokens,
     breakdown,
   }
+}
+
+// ── cost estimation (the status bar's cost segment) ──
+//
+// The harness meters TOKENS, never money — verified across rc.2: the usage
+// projection is the four-bucket fold and nothing anywhere carries an amount.
+// So the cost is a LOCAL ESTIMATE: a price table (元 / Mtok) × the token
+// buckets. The table is user-editable so the mechanism is not locked to any
+// one provider; entries that do not match a session's preset are skipped and
+// reported, never silently guessed.
+
+/** One price entry: 元 per million tokens. */
+export interface ModelPrice {
+  /** Match key against the session's agentPreset ('*' is the fallback). */
+  model: string
+  /** Cache-hit input. */
+  cached: number
+  /** Cache-miss input. */
+  uncached: number
+  /** Output. */
+  output: number
+  /**
+   * Cache-write billing; providers that do not bill it separately (DeepSeek)
+   * simply omit the field, which contributes zero.
+   */
+  cacheWrite?: number
+}
+
+/**
+ * Built-in defaults from DeepSeek's published pricing (api-docs.deepseek.com,
+ * 2026-09: V3.2 — 命中输入 ¥0.2/M、未命中输入 ¥2/M、输出 ¥3/M). The user
+ * override file can replace or extend these; prices change over time.
+ */
+export const BUILTIN_PRICES: readonly ModelPrice[] = [
+  { model: 'deepseek-chat', cached: 0.2, uncached: 2, output: 3 },
+  { model: 'deepseek-reasoner', cached: 0.2, uncached: 2, output: 3 },
+]
+
+/**
+ * Parse the user's model-prices.json (a JSON array of ModelPrice). Anything
+ * malformed is dropped, not fatal — a broken override file degrades to fewer
+ * price entries, never to a broken status bar.
+ */
+export function parsePriceOverrides(text: string): ModelPrice[] {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(raw)) return []
+  const out: ModelPrice[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const e = item as Record<string, unknown>
+    const model = typeof e.model === 'string' ? e.model.trim() : ''
+    if (!model) continue
+    const cached = num(e.cached)
+    const uncached = num(e.uncached)
+    const output = num(e.output)
+    if (cached <= 0 && uncached <= 0 && output <= 0) continue
+    const entry: ModelPrice = { model, cached, uncached, output }
+    const cacheWrite = num(e.cacheWrite)
+    if (cacheWrite > 0) entry.cacheWrite = cacheWrite
+    out.push(entry)
+  }
+  return out
+}
+
+/**
+ * Match a session's preset to a price entry: exact (case-insensitive) first,
+ * then the '*' fallback entry, then null — an unmatched session shows up in
+ * the summary's unmatched count instead of being billed at a guessed price.
+ */
+export function pickPrice(
+  entries: readonly ModelPrice[],
+  modelKey: string | undefined,
+): ModelPrice | null {
+  if (!modelKey) return null
+  const key = modelKey.toLowerCase()
+  for (const e of entries) {
+    if (e.model.toLowerCase() === key) return e
+  }
+  for (const e of entries) {
+    if (e.model === '*') return e
+  }
+  return null
+}
+
+/** 元 for one session's token buckets at one price entry. */
+export function estimateCost(
+  tokens: { uncachedInput?: number; output?: number; cacheRead?: number; cacheWrite?: number },
+  price: ModelPrice,
+): number {
+  const cost =
+    (num(tokens.uncachedInput) * price.uncached +
+      num(tokens.cacheRead) * price.cached +
+      num(tokens.output) * price.output +
+      num(tokens.cacheWrite) * (price.cacheWrite ?? 0)) /
+    1_000_000
+  return Math.round(cost * 10000) / 10000
+}
+
+export interface CostSummary {
+  /** Cache hit rate 0..100 over ALL matched sessions, or null. */
+  hitRate: number | null
+  /** Estimated total cost in 元, or null when no session matched a price. */
+  cost: number | null
+  /** The price entry the estimate used ('*' when the fallback matched). */
+  matched: string | null
+  /** Sessions whose preset matched no price entry (their tokens are NOT billed). */
+  unmatched: number
+}
+
+/**
+ * Format the status bar's cost segment, or '' when there is nothing to show.
+ * The 估算 marker is part of the contract: the figure is a local estimate,
+ * never a bill.
+ */
+export function formatCostSummary(s: CostSummary | null | undefined): string {
+  if (!s || typeof s !== 'object') return ''
+  const parts: string[] = []
+  if (s.hitRate !== null && s.hitRate !== undefined) {
+    parts.push(`命中率 ${s.hitRate}%`)
+  }
+  if (s.cost !== null && s.cost !== undefined) {
+    const yuan = s.cost >= 100 ? Math.round(s.cost) : Math.round(s.cost * 100) / 100
+    parts.push(`估算 ¥${yuan}`)
+  }
+  if (s.unmatched > 0) {
+    parts.push(`未匹配 ${s.unmatched}`)
+  }
+  return parts.join(' · ')
 }

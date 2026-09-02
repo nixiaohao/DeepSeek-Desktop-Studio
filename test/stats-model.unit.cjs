@@ -11,9 +11,14 @@ const assert = require('node:assert/strict')
 const {
   aggregateStats,
   aggregateOverview,
+  estimateCost,
+  formatCostSummary,
   formatDuration,
   formatTokens,
   formatStatsSummary,
+  parsePriceOverrides,
+  pickPrice,
+  BUILTIN_PRICES,
 } = require('../lib-new/stats-model.js')
 
 let checks = 0
@@ -175,6 +180,64 @@ check('breakdown sums composition; junk fields contribute zero', () => {
   ])
   assert.deepEqual(o.breakdown, { system: 500, tools: 1200, messages: 3200 })
   assert.equal(o.tokens.uncachedInput, 0)
+})
+
+// ── cost estimation (price table × token buckets) ──
+
+check('parsePriceOverrides keeps valid entries and drops junk', () => {
+  const entries = parsePriceOverrides(JSON.stringify([
+    { model: 'flash', cached: 0.1, uncached: 1, output: 2 },
+    { model: '', cached: 1, uncached: 1, output: 1 },           // no name → drop
+    { model: 'zeros' },                                          // no prices → drop
+    { model: 'cw', cached: 0.1, uncached: 1, output: 2, cacheWrite: 0.5 },
+    'junk', null, 42,                                            // non-objects → drop
+  ]))
+  assert.equal(entries.length, 2)
+  assert.equal(entries[0].model, 'flash')
+  assert.equal(entries[1].model, 'cw')
+  assert.equal(entries[1].cacheWrite, 0.5)
+  assert.equal(entries[0].cacheWrite, undefined)
+})
+
+check('parsePriceOverrides survives broken JSON and non-arrays', () => {
+  assert.deepEqual(parsePriceOverrides('{broken'), [])
+  assert.deepEqual(parsePriceOverrides('{"model":"x"}'), [])
+})
+
+check('pickPrice matches case-insensitively then falls back to *', () => {
+  const entries = [
+    { model: 'Flash', cached: 1, uncached: 2, output: 3 },
+    { model: '*', cached: 9, uncached: 9, output: 9 },
+  ]
+  assert.equal(pickPrice(entries, 'flash')?.cached, 1)
+  assert.equal(pickPrice(entries, 'unknown-preset')?.cached, 9)
+  assert.equal(pickPrice(entries, undefined), null)
+  assert.equal(pickPrice([{ model: 'a', cached: 1, uncached: 1, output: 1 }], 'b'), null)
+})
+
+check('estimateCost prices each bucket per million tokens', () => {
+  // DeepSeek V3.2: cached ¥0.2, uncached ¥2, output ¥3 per Mtok.
+  const price = BUILTIN_PRICES[0]
+  const cost = estimateCost(
+    { uncachedInput: 1_000_000, cacheRead: 2_000_000, output: 500_000, cacheWrite: 100_000 },
+    price,
+  )
+  // 2 + 0.4 + 1.5 + 0 (cacheWrite unbilled) = 3.9
+  assert.equal(cost, 3.9)
+})
+
+check('estimateCost bills cacheWrite only when the entry defines it', () => {
+  const withCw = { model: 'x', cached: 0, uncached: 0, output: 0, cacheWrite: 1 }
+  assert.equal(estimateCost({ cacheWrite: 1_000_000 }, withCw), 1)
+  assert.equal(estimateCost({ cacheWrite: 1_000_000 }, BUILTIN_PRICES[0]), 0)
+})
+
+check('formatCostSummary renders hit rate, estimate and unmatched', () => {
+  assert.equal(formatCostSummary(null), '')
+  assert.equal(formatCostSummary({ hitRate: null, cost: null, matched: null, unmatched: 0 }), '')
+  assert.equal(formatCostSummary({ hitRate: 94.2, cost: 1.234, matched: 'flash', unmatched: 0 }), '命中率 94.2% · 估算 ¥1.23')
+  assert.equal(formatCostSummary({ hitRate: 94, cost: 3.9, matched: 'flash', unmatched: 2 }), '命中率 94% · 估算 ¥3.9 · 未匹配 2')
+  assert.equal(formatCostSummary({ hitRate: null, cost: 123.456, matched: '*', unmatched: 0 }), '估算 ¥123')
 })
 
 console.log(`stats-model.unit: ${checks} checks passed`)

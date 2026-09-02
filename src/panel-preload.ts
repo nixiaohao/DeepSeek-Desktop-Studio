@@ -157,6 +157,17 @@ contextBridge.exposeInMainWorld('dshPanel', {
   },
   offStats: (cb: (...args: unknown[]) => void): void => off('panel:stats', cb),
 
+  // ── cost segment (status bar; local estimate, never a bill) ──
+
+  /** Latest cost line ('' when there is nothing to show). */
+  getCost: (): Promise<string> => ipcRenderer.invoke('panel:cost-now'),
+
+  /** Live cost line; pushed only when it actually changed (see ipc-registry). */
+  onCost: (cb: (line: string) => void): void => {
+    ipcRenderer.on('panel:cost', (_e: IpcRendererEvent, line) => cb(line))
+  },
+  offCost: (cb: (...args: unknown[]) => void): void => off('panel:cost', cb),
+
   /** Format a stats aggregate locally — same implementation the push uses. */
   formatStats: (s: unknown): string => formatStatsSummary(s as never),
 

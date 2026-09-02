@@ -87,6 +87,13 @@ export interface SessionInfo {
    */
   parentSessionId?: string
   origin?: string
+  /**
+   * The preset the session runs under (from session.list). The cost segment
+   * matches the user's price table against this key; it is a preset name,
+   * NOT a model id — the price file's model keys should use the same names
+   * the presets do.
+   */
+  agentPreset?: string
 }
 
 /** The subset of MuxFrame this store understands; unknown types are ignored. */

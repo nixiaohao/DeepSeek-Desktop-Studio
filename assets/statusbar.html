@@ -79,6 +79,7 @@
     <span class="spacer"></span>
     <span id="stats" title=""></span>
     <span class="sep" id="stats-sep" style="display:none"></span>
+    <span id="cost" title="本地估算：价格表 × token 用量，不是账单（可在 ~/.dsh/model-prices.json 配置）"></span>
     <span id="errors"></span>
     <span class="sep"></span>
     <span id="meta"></span>
@@ -136,6 +137,19 @@
   }
   if (api.getStats) api.getStats().then(renderStats).catch(function () {});
   if (api.onStats) api.onStats(renderStats);
+
+  // Cost segment: cache hit rate + estimated ¥ (price table × token usage).
+  // Composed in stats-model.ts (unit-tested); '' hides the segment. The line
+  // already carries the 估算 marker — it is an estimate, never a bill.
+  var costEl = document.getElementById('cost');
+  function renderCost(line) {
+    var text = (typeof line === 'string') ? line : '';
+    costEl.textContent = text;
+    costEl.style.display = text ? '' : 'none';
+  }
+  costEl.style.display = 'none';
+  if (api.getCost) api.getCost().then(renderCost).catch(function () {});
+  if (api.onCost) api.onCost(renderCost);
 
   api.getStatusInfo().then(function (info) {
     if (!info) return;

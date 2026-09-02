@@ -278,3 +278,29 @@ export function recoveryGuidePath(): string {
 export function hasRecoveryGuide(): boolean {
   return existsSync(RECOVERY_FILE)
 }
+
+// ── model price overrides (status bar cost segment) ──
+
+const PRICES_FILE = join(PREFS_DIR, 'model-prices.json')
+
+/**
+ * Read the user's price-table overrides from ~/.dsh/model-prices.json.
+ *
+ * Shape: an array of { model, cached, uncached, output, cacheWrite? } in
+ * 元 per Mtok; the `model` key matches the session's agentPreset ('*' is the
+ * fallback). Validation lives in parsePriceOverrides (stats-model) — here we
+ * only guarantee "missing or unreadable file means no overrides", and re-read
+ * on every pull so editing the file needs no restart.
+ */
+export function loadPriceOverridesText(): string {
+  try {
+    return readFileSync(PRICES_FILE, 'utf-8')
+  } catch {
+    return '[]'
+  }
+}
+
+/** Where the file lives, for the settings window's hint text. */
+export function priceOverridesPath(): string {
+  return PRICES_FILE
+}
