@@ -62,6 +62,8 @@ export interface SettingsState {
   sidebarVisible: boolean
   panelVisible: boolean
   statusVisible: boolean
+  /** Bottom log panel visibility (hidden by default — the monitor panel already streams backend output). */
+  logbarVisible: boolean
   /** External editor; empty `command` means "use the OS file association". */
   editor: { command: string; args: string }
   /** Upstream release channel id. Changing it requires an app restart. */
@@ -204,6 +206,7 @@ export function changedFields(before: SettingsState, after: SettingsState): Sett
     'sidebarVisible',
     'panelVisible',
     'statusVisible',
+    'logbarVisible',
     'editor',
     'channel',
   ]

@@ -408,15 +408,24 @@ function requiresOf(rel) {
   assert(deps.length === 0, 'settings-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
 {
-  // The two sandboxed bridges must require NOTHING but 'electron'.
+  // The logbar's merge/sort/filter logic. It is what decides what the user
+  // sees when they are looking for the cause of a failure, so it must load
+  // and run in plain node — a runtime import here would put a broken Electron
+  // module between the user and the logs.
+  const deps = requiresOf('log-model.js')
+  assert(deps.length === 0, 'log-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
+{
+  // The three sandboxed bridges must require NOTHING but 'electron'.
   //
   // A local require inside a sandboxed preload throws before
   // exposeInMainWorld runs, so the page comes up with no bridge at all. For
-  // these two windows that is the worst possible outcome: diagnostics is what
-  // the user opens when everything looks broken, and settings is what they
-  // open to fix a configuration — a window whose own startup depends on the
-  // thing that is misconfigured.
-  for (const rel of ['diagnostics-preload.js', 'settings-preload.js']) {
+  // these windows that is the worst possible outcome: diagnostics is what
+  // the user opens when everything looks broken, settings is what they open
+  // to fix a configuration, and the logbar is where they read the logs to
+  // find out why — a window whose own startup depends on the thing that is
+  // broken defeats its purpose.
+  for (const rel of ['diagnostics-preload.js', 'settings-preload.js', 'logbar-preload.js']) {
     const deps = requiresOf(rel)
     assert(
       deps.length === 1 && deps[0] === 'electron',
@@ -443,6 +452,14 @@ const EXPECTED = [
   ['window-manager.js', 'SIDEBAR_MIN_WIDTH'],
   ['layout-geometry.js', 'computeLayout'],
   ['layout-geometry.js', 'CONTENT_MIN_WIDTH'],
+  ['layout-geometry.js', 'CONTENT_MIN_HEIGHT'],
+  ['layout-geometry.js', 'LOGBAR_MIN_HEIGHT'],
+  ['layout-geometry.js', 'LOGBAR_MAX_HEIGHT'],
+  ['log-model.js', 'parseShellLine'],
+  ['log-model.js', 'entryFromBackend'],
+  ['log-model.js', 'buildView'],
+  ['log-model.js', 'LOG_SOURCES'],
+  ['log-model.js', 'LOG_SOURCE_LABELS'],
   ['ipc-registry.js', 'registerIpc'],
   ['external-editor.js', 'openInEditor'],
   ['external-editor.js', 'EDITOR_PRESETS'],
@@ -559,6 +576,20 @@ for (const ch of invoked) {
 for (const ch of ['switch-theme', 'window-minimize', 'window-maximize', 'window-close']) {
   assert(ipcChannels.on.has(ch), `legacy channel '${ch}' still registered`, `the legacy '${ch}' handler was lost in the move to ipc-registry.ts`)
 }
+
+// The logbar bridge gets the same producer/consumer cross-check, against its
+// OWN preload: an invoke the page makes that no handler answers shows up in
+// the packaged app as a console error in a panel the user just opened.
+const logbarPreloadSrc = fs.readFileSync(path.join(ROOT, 'src', 'logbar-preload.ts'), 'utf-8')
+const logbarInvoked = [...logbarPreloadSrc.matchAll(/ipcRenderer\.invoke\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1])
+for (const ch of logbarInvoked) {
+  assert(ipcChannels.handle.has(ch), `registerIpc handles '${ch}' (logbar)`, `'${ch}' is invoked by logbar-preload but never registered`)
+}
+assert(
+  ipcChannels.on.has('logs:view-ready'),
+  "registerIpc listens on 'logs:view-ready'",
+  "logbar-preload sends 'logs:view-ready' but nothing listens — the diagnostics report would show the logbar as never-ready"
+)
 
 // Teardown must be safe to call and must not leak the 5s health ticker.
 let teardownError = null
@@ -1007,7 +1038,7 @@ function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 150
+  const MIN_ASSERTIONS = 165
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,

@@ -108,6 +108,11 @@ export function log(name: LogName, msg: string): void {
   const line = `[${ts}] ${msg}`
   ring.push({ name, ts, line })
   if (ring.length > RING_LIMIT) ring.shift()
+  for (const cb of logSubs) {
+    try {
+      cb(name, ts, line)
+    } catch { /* listener teardown races are expected; keep logging */ }
+  }
   try {
     const file = join(dir(), `${name}.log`)
     rotateIfNeeded(file)
@@ -156,6 +161,26 @@ export function appendChildOutput(name: LogName, chunk: string): void {
 /** Last N ring-buffer lines, prefixed with the source log name. */
 export function getRecentLines(n = 50): string[] {
   return ring.slice(-n).map((r) => `[${r.name}] ${r.line}`)
+}
+
+// ── Mixed shell-log feed ──
+//
+// The `ring` above had no subscription path: only backend output supported
+// live push (subscribeBackend). The bottom log panel merges both feeds, so
+// shell lines (launcher / wizard / fatal) need the same push affordance.
+const logSubs = new Set<(name: LogName, ts: string, line: string) => void>()
+
+/**
+ * Subscribe to shell log lines as they are written via log(). Returns an
+ * unsubscribe function — the same teardown contract as subscribeBackend().
+ * Lines arrive in the exact shape getRecentLines() produces so a subscriber
+ * can replay a snapshot and then apply live lines without re-parsing.
+ */
+export function subscribeLog(cb: (name: LogName, ts: string, line: string) => void): () => void {
+  logSubs.add(cb)
+  return () => {
+    logSubs.delete(cb)
+  }
 }
 
 /** Absolute path of the logs directory. */

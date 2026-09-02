@@ -7,7 +7,9 @@
  *
  *      ┌──────────┬──────────────────────────┬─────────┐
  *      │ sidebar  │  dsh page (content)      │ panel   │
- *      └──────────┴──────────────────────────┴─────────┘
+ *      ├──────────┴──────────────────────────┴─────────┤
+ *      │                log bar (logs)                 │
+ *      ├───────────────────────────────────────────────┤
  *      │                status bar                     │
  *
  * Every rectangle is derived from the SAME numbers that draw the overlays, so
@@ -49,6 +51,19 @@ export const SIDEBAR_MAX_WIDTH = 560
  */
 export const CONTENT_MIN_WIDTH = 360
 
+/** Draggable height limits for the bottom log bar, px. */
+export const LOGBAR_MIN_HEIGHT = 100
+export const LOGBAR_MAX_HEIGHT = 480
+/**
+ * Vertical space the dsh page is ever squeezed to, px.
+ *
+ * The horizontal `CONTENT_MIN_WIDTH` has a vertical counterpart for the same
+ * reason: when the window is too short to show both a usable page and the log
+ * bar, the log bar collapses to 0 (via `fit`) instead of drawing a clipped
+ * strip over a page that has already been squeezed flat.
+ */
+export const CONTENT_MIN_HEIGHT = 240
+
 /** What the layout is computed from. All lengths in px. */
 export interface LayoutInput {
   /** Window content width (window size minus the OS frame), px. */
@@ -62,6 +77,10 @@ export interface LayoutInput {
   /** Preferred panel width; clamped, so it is not necessarily the drawn one. */
   panelWidth: number
   statusVisible: boolean
+  /** Bottom log bar shown. */
+  logbarVisible: boolean
+  /** Preferred log bar height; clamped, so it is not necessarily the drawn one. */
+  logbarHeight: number
 }
 
 /** A rectangle in window-content coordinates. */
@@ -78,6 +97,8 @@ export interface WindowLayout {
   content: Rect
   sidebar: Rect
   panel: Rect
+  /** Full-width strip above the status bar (zero height when hidden/collapsed). */
+  logbar: Rect
   statusBar: Rect
 }
 
@@ -109,7 +130,17 @@ function fit(preferred: number, min: number, max: number, room: number): number 
  */
 export function computeLayout(input: LayoutInput): WindowLayout {
   const bar = input.statusVisible ? STATUS_BAR_HEIGHT : 0
-  const bodyHeight = Math.max(0, input.height - bar)
+  const room = Math.max(0, input.height - bar)
+
+  // The log bar is decided before the columns because it takes a horizontal
+  // slice out of every one of their heights. Same `fit` semantics as the
+  // overlays: when reserving the page's vertical minimum would leave less
+  // than LOGBAR_MIN_HEIGHT, the bar collapses to 0 instead of drawing a
+  // clipped strip.
+  const logbarHeight = input.logbarVisible
+    ? fit(input.logbarHeight, LOGBAR_MIN_HEIGHT, LOGBAR_MAX_HEIGHT, room - CONTENT_MIN_HEIGHT)
+    : 0
+  const bodyHeight = Math.max(0, room - logbarHeight)
 
   // Panel first: it is anchored to the right edge, so its clamped width has to
   // be known before the sidebar can be told how much room is left.
@@ -140,6 +171,12 @@ export function computeLayout(input: LayoutInput): WindowLayout {
       y: 0,
       width: panelWidth,
       height: bodyHeight,
+    },
+    logbar: {
+      x: 0,
+      y: Math.max(0, input.height - bar - logbarHeight),
+      width: input.width,
+      height: logbarHeight,
     },
     statusBar: {
       x: 0,

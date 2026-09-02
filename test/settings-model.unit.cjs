@@ -43,6 +43,7 @@ function state(over) {
     sidebarVisible: true,
     panelVisible: true,
     statusVisible: true,
+    logbarVisible: false,
     editor: { command: 'code', args: '--goto {file}:{line}' },
     channel: 'next',
   }
@@ -159,6 +160,12 @@ check('a rebuilt-but-equal editor object is NOT a change', () => {
 
 check('a scalar change is reported', () => {
   assert.deepStrictEqual(changedFields(state(), state({ uiScale: 1.3 })), ['uiScale'])
+})
+
+check('logbar visibility change is reported and needs no restart', () => {
+  const out = changedFields(state(), state({ logbarVisible: true }))
+  assert.deepStrictEqual(out, ['logbarVisible'])
+  assert.strictEqual(needsRestart(out), false)
 })
 
 check('editor command change is reported as the editor field', () => {

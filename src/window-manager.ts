@@ -54,6 +54,8 @@ import type { ViewState } from './diagnostics.js'
 import {
   computeLayout,
   CONTENT_MIN_WIDTH,
+  LOGBAR_MAX_HEIGHT,
+  LOGBAR_MIN_HEIGHT,
   PANEL_MAX_WIDTH,
   PANEL_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -62,7 +64,15 @@ import {
 } from './layout-geometry.js'
 
 /** Re-exported so existing importers keep working. */
-export { STATUS_BAR_HEIGHT, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH }
+export {
+  STATUS_BAR_HEIGHT,
+  PANEL_MIN_WIDTH,
+  PANEL_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  LOGBAR_MIN_HEIGHT,
+  LOGBAR_MAX_HEIGHT,
+}
 
 /**
  * How many preload/renderer failure strings are kept per view.
@@ -75,7 +85,7 @@ export { STATUS_BAR_HEIGHT, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
 const VIEW_ERROR_LIMIT = 8
 
 /** The overlays whose preload health is tracked. */
-export type ViewLabel = 'panel' | 'statusbar' | 'sidebar'
+export type ViewLabel = 'panel' | 'statusbar' | 'sidebar' | 'logbar'
 
 /** Options for the dsh page's view. */
 export interface ContentViewOptions {
@@ -92,6 +102,7 @@ export class WindowManager {
   private panelView: WebContentsView | null = null
   private statusView: WebContentsView | null = null
   private sidebarView: WebContentsView | null = null
+  private logbarView: WebContentsView | null = null
   private prefs: PanelPrefs
   private resizeBound = false
   /**
@@ -179,6 +190,11 @@ export class WindowManager {
   /** The file/git sidebar's WebContentsView (null until attach()). */
   get sidebar(): WebContentsView | null {
     return this.sidebarView
+  }
+
+  /** The bottom log bar's WebContentsView (null until attach()). */
+  get logBar(): WebContentsView | null {
+    return this.logbarView
   }
 
   get panelPrefs(): PanelPrefs {
@@ -321,17 +337,33 @@ export class WindowManager {
     })
     this.sidebarView.webContents.loadFile(join(assets, 'sidebar.html'), { query: { view: 'sidebar' } })
 
+    // The log bar gets its own preload for the same reason as the sidebar:
+    // a separate file means a separate contract entry instead of growing the
+    // panel's brace-matched API. Unlike the sidebar it stays SANDBOXED (like
+    // diagnostics/settings): logbar-preload requires nothing but 'electron' —
+    // source labels travel over IPC inside logs:snapshot instead.
+    this.logbarView = new WebContentsView({
+      webPreferences: {
+        preload: join(__dirname, 'logbar-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    })
+    this.logbarView.webContents.loadFile(join(assets, 'logbar.html'), { query: { view: 'logbar' } })
+
     // Seed the health map BEFORE the views can report anything: a view that
     // never pings must still appear in the report as "never reported ready"
     // rather than being absent, because absence would read as "not enabled".
     this.viewState.set('panel', { readyAt: 0, errors: [] })
     this.viewState.set('statusbar', { readyAt: 0, errors: [] })
     this.viewState.set('sidebar', { readyAt: 0, errors: [] })
+    this.viewState.set('logbar', { readyAt: 0, errors: [] })
 
     // Font scaling. Registered per view, not once globally: insertCSS is
     // per-WebContents and does not survive a navigation, so each view re-applies
     // its own copy on reload. See ui-scale.ts for why this is CSS and not zoom.
-    for (const view of [this.panelView, this.statusView, this.sidebarView]) {
+    for (const view of [this.panelView, this.statusView, this.sidebarView, this.logbarView]) {
       if (!view) continue
       this.bindUiScale(view)
     }
@@ -340,10 +372,14 @@ export class WindowManager {
     // never finishes loading. Without it the user sees only a dead "preload 未
     // 加载" string with no clue why; with it we get a real reason in the log
     // and panel.html can show it instead of the dead default.
-    for (const view of [this.panelView, this.statusView, this.sidebarView]) {
+    const overlayLabels: [WebContentsView, ViewLabel][] = [
+      [this.panelView, 'panel'],
+      [this.statusView, 'statusbar'],
+      [this.sidebarView, 'sidebar'],
+      [this.logbarView, 'logbar'],
+    ]
+    for (const [view, label] of overlayLabels) {
       if (!view) continue
-      const label: ViewLabel =
-        view === this.panelView ? 'panel' : view === this.statusView ? 'statusbar' : 'sidebar'
       view.webContents.on('preload-error', (_e, preloadPath, err) => {
         const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
         log('launcher', `preload-error[${label}] path=${preloadPath} ${message}`)
@@ -355,10 +391,12 @@ export class WindowManager {
       })
     }
 
-    // AFTER the content view — see createContentView().
+    // AFTER the content view — see createContentView(). The relative order
+    // among the overlays does not matter: their rects never overlap.
     this.win.contentView.addChildView(this.panelView)
     this.win.contentView.addChildView(this.statusView)
     this.win.contentView.addChildView(this.sidebarView)
+    this.win.contentView.addChildView(this.logbarView)
 
     if (!this.resizeBound) {
       this.win.on('resize', () => this.layout())
@@ -371,7 +409,15 @@ export class WindowManager {
 
   /** Recompute every view's bounds. Call after ANY geometry change. */
   layout(): void {
-    if (!this.contentView && !this.panelView && !this.statusView && !this.sidebarView) return
+    if (
+      !this.contentView &&
+      !this.panelView &&
+      !this.statusView &&
+      !this.sidebarView &&
+      !this.logbarView
+    ) {
+      return
+    }
     const [width, height] = this.win.getContentSize()
 
     const rects = computeLayout({
@@ -382,12 +428,15 @@ export class WindowManager {
       panelVisible: this.prefs.visible,
       panelWidth: this.prefs.width,
       statusVisible: this.prefs.statusVisible,
+      logbarVisible: this.prefs.logbarVisible,
+      logbarHeight: this.prefs.logbarHeight,
     })
 
     this.contentView?.setBounds(rects.content)
     this.panelView?.setBounds(rects.panel)
     this.statusView?.setBounds(rects.statusBar)
     this.sidebarView?.setBounds(rects.sidebar)
+    this.logbarView?.setBounds(rects.logbar)
   }
 
   setPanelVisible(visible: boolean): void {
@@ -428,6 +477,26 @@ export class WindowManager {
     this.layout()
   }
 
+  setLogbarVisible(visible: boolean): void {
+    this.prefs = { ...this.prefs, logbarVisible: visible }
+    savePanelPrefs({ logbarVisible: visible })
+    this.applyVisibility()
+    this.layout()
+  }
+
+  toggleLogbar(): void {
+    this.setLogbarVisible(!this.prefs.logbarVisible)
+  }
+
+  /** Resize the log bar (height; there is no drag handle — menu/defaults only). */
+  setLogbarHeight(height: number): void {
+    const clamped = Math.min(LOGBAR_MAX_HEIGHT, Math.max(LOGBAR_MIN_HEIGHT, Math.round(height)))
+    if (clamped === this.prefs.logbarHeight) return
+    this.prefs = { ...this.prefs, logbarHeight: clamped }
+    savePanelPrefs({ logbarHeight: clamped })
+    this.layout()
+  }
+
   /** Resize the panel (dragged from its left edge inside panel.html). */
   setPanelWidth(width: number): void {
     const clamped = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width)))
@@ -449,7 +518,7 @@ export class WindowManager {
 
   /** Tear down views. Call when the window closes. */
   destroy(): void {
-    for (const view of [this.contentView, this.panelView, this.statusView, this.sidebarView]) {
+    for (const view of [this.contentView, this.panelView, this.statusView, this.sidebarView, this.logbarView]) {
       if (!view) continue
       try {
         this.win.contentView.removeChildView(view)
@@ -460,5 +529,6 @@ export class WindowManager {
     this.panelView = null
     this.statusView = null
     this.sidebarView = null
+    this.logbarView = null
   }
 }

@@ -67,6 +67,10 @@ export interface PanelPrefs {
   monitorHeight: number
   /** Bottom status bar shown. */
   statusVisible: boolean
+  /** Bottom log bar shown (off by default — the right panel already streams backend output). */
+  logbarVisible: boolean
+  /** Height of the bottom log bar in px. */
+  logbarHeight: number
   /** Left file/git sidebar shown at all. */
   sidebarVisible: boolean
   /** Sidebar width in px. */
@@ -127,6 +131,13 @@ export const DEFAULT_PANEL_PREFS: PanelPrefs = {
   width: 320,
   monitorHeight: 220,
   statusVisible: true,
+  // The log bar starts hidden: the right panel already streams backend output,
+  // so a permanent bottom strip would be duplicate pixels for most users. It
+  // is one menu click away (视图 → 日志面板) and the choice persists.
+  logbarVisible: false,
+  // Fits a header row plus ~7 log lines at the 13px type scale without
+  // demanding it — LOGBAR_MIN/MAX_HEIGHT clamp the drawn value either way.
+  logbarHeight: 180,
   // The page, sidebar and panel are three real columns (see
   // layout-geometry.ts): the page is bounded to whatever space the overlays
   // leave, so opening the sidebar narrows the page instead of covering it.
@@ -210,6 +221,7 @@ export function loadPanelPrefs(): PanelPrefs {
     width: num(merged.width, DEFAULT_PANEL_PREFS.width),
     monitorHeight: num(merged.monitorHeight, DEFAULT_PANEL_PREFS.monitorHeight),
     sidebarWidth: num(merged.sidebarWidth, DEFAULT_PANEL_PREFS.sidebarWidth),
+    logbarHeight: num(merged.logbarHeight, DEFAULT_PANEL_PREFS.logbarHeight),
     uiScale: normalizeUiScale(merged.uiScale),
   }
 }

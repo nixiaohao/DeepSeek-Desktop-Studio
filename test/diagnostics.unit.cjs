@@ -146,7 +146,7 @@ check('a view that was never created is not a failure', () => {
 
 check('all three overlays are reported separately', () => {
   const r = buildReport(input())
-  for (const id of ['view-panel', 'view-statusbar', 'view-sidebar']) {
+  for (const id of ['view-panel', 'view-statusbar', 'view-sidebar', 'view-logbar']) {
     assert.ok(byId(r, id), `missing ${id}`)
   }
 })

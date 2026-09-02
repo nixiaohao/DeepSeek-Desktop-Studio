@@ -88,6 +88,20 @@ const BRIDGES = [
     html: [path.join('assets', 'settings.html')],
     minMethods: 6,
   },
+  // The bottom log panel. It is SANDBOXED like settings/diagnostics (its
+  // preload requires nothing but 'electron' — source labels ride inside
+  // logs:snapshot), and it gets the same channel-registration contract: a
+  // name used by the preload but never registered in ipc-registry.ts would
+  // fail silently, per line, forever. Floor is 4: the page consumes three
+  // (snapshot, onLines, revealLogDir) and offLines pairs onLines.
+  {
+    name: 'logbar',
+    preload: 'logbar-preload.ts',
+    world: 'dshLogs',
+    ns: 'logs:',
+    html: [path.join('assets', 'logbar.html')],
+    minMethods: 4,
+  },
 ]
 
 /**
@@ -508,6 +522,7 @@ const TYPE_SCALE_PAGES = [
   path.join('assets', 'statusbar.html'),
   path.join('assets', 'diagnostics.html'),
   path.join('assets', 'settings.html'),
+  path.join('assets', 'logbar.html'),
 ]
 
 for (const asset of TYPE_SCALE_PAGES) {

@@ -28,12 +28,15 @@ export interface MenuActions {
     panel: boolean
     statusBar: boolean
     sidebar: boolean
+    logbar: boolean
     /** Panel font size multiplier — one of UI_SCALES. */
     uiScale: UiScale
   }
   togglePanel: () => void
   toggleStatusBar: () => void
   toggleSidebar: () => void
+  /** Show/hide the bottom log panel. The menu is rebuilt afterwards to re-mark it. */
+  toggleLogbar: () => void
   /** Resize the shell's fonts. The menu is rebuilt afterwards to re-mark it. */
   setUiScale: (scale: UiScale) => void
 
@@ -142,6 +145,13 @@ export function setupMenu(actions: MenuActions): void {
           type: 'checkbox',
           checked: panel.statusBar,
           click: () => actions.toggleStatusBar(),
+        },
+        {
+          label: '日志面板',
+          accelerator: 'Ctrl+Alt+L',
+          type: 'checkbox',
+          checked: panel.logbar,
+          click: () => actions.toggleLogbar(),
         },
         { type: 'separator' },
         // ── panel font size ──

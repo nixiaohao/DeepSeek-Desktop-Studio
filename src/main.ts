@@ -785,6 +785,7 @@ function buildMenuActions(): MenuActions {
         panel: p.visible,
         statusBar: p.statusVisible,
         sidebar: p.sidebarVisible,
+        logbar: p.logbarVisible,
         uiScale: p.uiScale,
       }
     },
@@ -799,6 +800,10 @@ function buildMenuActions(): MenuActions {
     toggleStatusBar: () => {
       const next = !(windowManager?.panelPrefs.statusVisible ?? loadPanelPrefs().statusVisible)
       windowManager?.setStatusVisible(next)
+      rebuildMenu()
+    },
+    toggleLogbar: () => {
+      windowManager?.toggleLogbar()
       rebuildMenu()
     },
     setUiScale: (scale) => {

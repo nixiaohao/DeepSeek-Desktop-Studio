@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!-- 'unsafe-inline' is required: the logic is an inline <script>, and
+     script-src 'self' alone makes Chromium drop it silently — the panel would
+     render but never update. See the longer note in panel.html. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline';" />
+<title>日志面板</title>
+<style>
+  :root {
+    --bg: #161920;
+    --bg-2: #1a1d26;
+    --border: #272b36;
+    --fg: #d6dae3;
+    --dim: #8b93a7;
+    --accent: #4c8dff;
+    --err: #ff6b6b;
+    --warn: #ffb454;
+    /* Type scale — see panel.html. The log bar tracks the same tokens so the
+       面板字号 setting resizes it together with every other shell surface. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --font-ui: "Segoe UI", "Microsoft YaHei", sans-serif;
+    --font-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.45;
+    display: flex; flex-direction: column;
+    border-top: 1px solid var(--border);
+    user-select: none;
+  }
+
+  header {
+    flex: none; display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; background: var(--bg-2);
+  }
+  header .title { font-weight: 600; margin-right: 2px; }
+  header .spacer { flex: 1; }
+  header .hint { color: var(--dim); font-size: var(--fs-sm); }
+  .chip {
+    background: #22262f; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1px 10px; cursor: pointer;
+  }
+  .chip.off { opacity: .38; text-decoration: line-through; }
+
+  /* Form controls do NOT inherit font-family/size from body in Chromium, so
+     every one of them restates the tokens. Omitting it leaves 13px labels next
+     to an 11px default control — the exact mismatch the type scale exists to
+     prevent. */
+  button, input {
+    font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.5;
+    color: var(--fg); background: #22262f;
+    border: 1px solid var(--border); border-radius: 3px;
+  }
+  button { cursor: pointer; padding: 1px 8px; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=checkbox] { width: auto; padding: 0; }
+  label.chk { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: var(--fs-sm); }
+
+  #no-bridge {
+    display: none; padding: 10px 14px; color: var(--warn);
+  }
+  #lines {
+    flex: 1; overflow-y: auto; padding: 4px 8px 8px;
+    font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5;
+    user-select: text; cursor: text;
+  }
+  #lines .empty { color: var(--dim); font-family: var(--font-ui); }
+  .row { white-space: pre-wrap; word-break: break-all; }
+  .row .t { color: var(--dim); }
+  .row .src { color: var(--accent); }
+  .row.err .text { color: var(--err); }
+  .row.fatal .src { color: var(--err); font-weight: 600; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">日志</span>
+    <span id="chips"></span>
+    <span class="spacer"></span>
+    <label class="chk"><input type="checkbox" id="chk-autoscroll" checked />自动滚动</label>
+    <button id="btn-dir" title="在文件管理器中打开日志文件夹">打开日志目录</button>
+  </header>
+  <div id="no-bridge">
+    日志面板不可用（preload 未加载）。完整日志在
+    %APPDATA%\deepseek-studio\logs\，可通过菜单「视图 → 打开日志文件夹」直达。
+  </div>
+  <div id="lines"><div class="empty">加载中…</div></div>
+
+<script>
+(function () {
+  'use strict';
+  var api = window.dshLogs;
+  if (!api) {
+    document.getElementById('no-bridge').style.display = 'block';
+    document.getElementById('lines').textContent = '';
+    return;
+  }
+
+  var MAX_KEPT = 2000; // client-side ceiling; the main process caps each batch too
+  var entries = [];    // everything received, oldest first
+  var active = null;   // null = all sources; otherwise a Set of source ids
+  var labels = {};     // source id -> Chinese label
+
+  var linesEl = document.getElementById('lines');
+  var chipsEl = document.getElementById('chips');
+  var autoscroll = document.getElementById('chk-autoscroll');
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  function rowFor(e) {
+    var row = document.createElement('div');
+    row.className = 'row' + (e.stream === 'err' ? ' err' : '') + (e.source === 'fatal' ? ' fatal' : '');
+    var t = document.createElement('span');
+    t.className = 't';
+    t.textContent = fmtTime(e.ts) + ' ';
+    var src = document.createElement('span');
+    src.className = 'src';
+    src.textContent = '[' + (labels[e.source] || e.source) + '] ';
+    var text = document.createElement('span');
+    text.className = 'text';
+    text.textContent = e.text;
+    row.appendChild(t);
+    row.appendChild(src);
+    row.appendChild(text);
+    return row;
+  }
+
+  function visible() {
+    if (!active) return entries;
+    return entries.filter(function (e) { return active.indexOf(e.source) >= 0; });
+  }
+
+  var renderScheduled = false;
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    // One frame for a whole batch: a chatty backend must not lay out per line.
+    requestAnimationFrame(function () {
+      renderScheduled = false;
+      var stick = autoscroll.checked &&
+        (linesEl.scrollTop + linesEl.clientHeight >= linesEl.scrollHeight - 24);
+      var view = visible();
+      var frag = document.createDocumentFragment();
+      if (!view.length) {
+        var empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = entries.length ? '当前筛选下没有日志' : '暂无日志输出';
+        frag.appendChild(empty);
+      } else {
+        for (var i = 0; i < view.length; i++) frag.appendChild(rowFor(view[i]));
+      }
+      linesEl.textContent = '';
+      linesEl.appendChild(frag);
+      if (stick) linesEl.scrollTop = linesEl.scrollHeight;
+    });
+  }
+
+  function absorb(list) {
+    if (!list || !list.length) return;
+    for (var i = 0; i < list.length; i++) entries.push(list[i]);
+    if (entries.length > MAX_KEPT) entries.splice(0, entries.length - MAX_KEPT);
+    scheduleRender();
+  }
+
+  function buildChips(sources) {
+    chipsEl.textContent = '';
+    for (var i = 0; i < sources.length; i++) {
+      (function (id, label) {
+        labels[id] = label;
+        var chip = document.createElement('button');
+        chip.className = 'chip';
+        chip.textContent = label;
+        chip.title = '点击显示/隐藏该来源';
+        chip.onclick = function () {
+          if (!active) {
+            // First interaction: start from "everything" so toggling one
+            // source hides only that one, rather than showing only it.
+            active = sources.map(function (s) { return s.id; });
+          }
+          var at = active.indexOf(id);
+          if (at >= 0) active.splice(at, 1); else active.push(id);
+          chip.className = 'chip' + (active.indexOf(id) < 0 ? ' off' : '');
+          scheduleRender();
+        };
+        chipsEl.appendChild(chip);
+      })(sources[i].id, sources[i].label);
+    }
+  }
+
+  api.snapshot().then(function (snap) {
+    if (snap && snap.sources) buildChips(snap.sources);
+    absorb(snap ? snap.entries : []);
+  }).catch(function () {
+    linesEl.textContent = '';
+    var empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = '无法读取日志快照';
+    linesEl.appendChild(empty);
+  });
+
+  api.onLines(absorb);
+
+  document.getElementById('btn-dir').onclick = function () {
+    api.revealLogDir();
+  };
+  autoscroll.onchange = function () {
+    if (autoscroll.checked) linesEl.scrollTop = linesEl.scrollHeight;
+  };
+})();
+</script>
+</body>
+</html>

@@ -171,9 +171,16 @@ export function buildReport(input: DiagnosticsInput): DiagnosticsReport {
 
   // ── the two failures that started all this ──
 
-  for (const name of ['panel', 'statusbar', 'sidebar']) {
+  // Every shell overlay the self-check proves alive. One map, one loop: adding
+  // a fifth view means adding a row here and nothing else.
+  const VIEW_LABELS: Record<string, string> = {
+    panel: '监控面板',
+    statusbar: '状态栏',
+    sidebar: '文件侧栏',
+    logbar: '日志面板',
+  }
+  for (const [name, label] of Object.entries(VIEW_LABELS)) {
     const view = input.views?.[name]
-    const label = name === 'panel' ? '监控面板' : name === 'statusbar' ? '状态栏' : '文件侧栏'
     if (!view) {
       push(check(`view-${name}`, `${label} preload`, 'ok', '未启用（未创建该视图）'))
       continue

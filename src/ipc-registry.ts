@@ -22,8 +22,10 @@ import { ipcMain, shell, clipboard, dialog, BrowserWindow, Notification } from '
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { subscribeBackend, getBackendLines, getLogDir, log } from './logging.js'
+import { subscribeBackend, getBackendLines, getLogDir, getRecentLines, log, subscribeLog } from './logging.js'
 import type { BackendLine } from './logging.js'
+import { buildView, entryFromBackend, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
+import type { LogEntry } from './log-model.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import {
   savePreferences,
@@ -168,6 +170,22 @@ export function pushSidebarUpdate(): void {
 }
 
 /**
+ * Push one structured log entry to the bottom log panel.
+ *
+ * Mirrors pushSidebarUpdate(): late-bound manager lookup (the logbar outlives
+ * individual windows and the feed runs before/after window rebuilds), and a
+ * try/catch because the view may be torn down mid-send. The page batches its
+ * own rendering through requestAnimationFrame, so per-line sends are fine.
+ */
+export function pushLogbar(entry: LogEntry): void {
+  const view = getWindowManagerCached?.()?.logBar ?? null
+  if (!view) return
+  try {
+    view.webContents.send('logs:lines', [entry])
+  } catch { /* view destroyed mid-send */ }
+}
+
+/**
  * Refuse any path from the renderer that is not inside the sidebar's root.
  *
  * The renderer is our own asset and contextIsolation is on, so this is not
@@ -254,6 +272,7 @@ export function registerIpc(deps: IpcDeps): () => void {
   // prevent, so it must stay greppable.
   ipcMain.on('panel:view-ready', onViewReady)
   ipcMain.on('sidebar:view-ready', onViewReady)
+  ipcMain.on('logs:view-ready', onViewReady)
 
   // ── Panel: backend output ──
 
@@ -552,6 +571,26 @@ export function registerIpc(deps: IpcDeps): () => void {
     }
   })
 
+  // ── Logbar: bottom log panel ──
+
+  /**
+   * Buffered history from both feeds, merged/sorted/capped by log-model.ts.
+   *
+   * `active` is deliberately null here — the page applies its own chip filter
+   * on top, and re-invoking snapshot on every filter toggle would ship the
+   * whole ring over IPC for nothing. `sources` rides along so the page builds
+   * its chips from the same list the main process filters with.
+   */
+  ipcMain.handle('logs:snapshot', () => ({
+    entries: buildView(getRecentLines(400), getBackendLines(400), null, 400),
+    sources: LOG_SOURCES.map((id) => ({ id, label: LOG_SOURCE_LABELS[id] })),
+  }))
+
+  ipcMain.handle('logs:reveal-dir', async () => {
+    const err = await shell.openPath(getLogDir())
+    return err ? { ok: false, error: err } : { ok: true }
+  })
+
   // ── Settings: standalone settings window ──
 
   /**
@@ -583,6 +622,7 @@ export function registerIpc(deps: IpcDeps): () => void {
       sidebarVisible: p.sidebarVisible,
       panelVisible: p.visible,
       statusVisible: p.statusVisible,
+      logbarVisible: p.logbarVisible,
       editor: { command: editor?.command ?? '', args: editor?.args ?? '' },
       channel: normalizeChannel(prefs.channel),
     }
@@ -636,6 +676,7 @@ export function registerIpc(deps: IpcDeps): () => void {
       sidebarVisible: typeof src.sidebarVisible === 'boolean' ? src.sidebarVisible : before.sidebarVisible,
       panelVisible: typeof src.panelVisible === 'boolean' ? src.panelVisible : before.panelVisible,
       statusVisible: typeof src.statusVisible === 'boolean' ? src.statusVisible : before.statusVisible,
+      logbarVisible: typeof src.logbarVisible === 'boolean' ? src.logbarVisible : before.logbarVisible,
       editor: {
         command: normalizeTextField(ed.command),
         args: normalizeTextField(ed.args, 256),
@@ -669,6 +710,10 @@ export function registerIpc(deps: IpcDeps): () => void {
     if (changes.includes('statusVisible')) {
       wm?.setStatusVisible(after.statusVisible)
       savePanelPrefs({ statusVisible: after.statusVisible })
+    }
+    if (changes.includes('logbarVisible')) {
+      wm?.setLogbarVisible(after.logbarVisible)
+      savePanelPrefs({ logbarVisible: after.logbarVisible })
     }
 
     if (changes.includes('editor')) saveExternalEditor(after.editor)
@@ -778,6 +823,16 @@ export function registerIpc(deps: IpcDeps): () => void {
   const unsubBackend = subscribeBackend((line: BackendLine) => {
     broadcast(getWindowManager(), 'panel:backend-line', line)
     getHealthMonitor()?.feedLine(line)
+    pushLogbar(entryFromBackend(line))
+  })
+
+  // Second feed for the logbar: shell lines (launcher / wizard / fatal) from
+  // log(). parseShellLine re-parses the exact string shape getRecentLines()
+  // produces, so a replayed snapshot and a live line take the same path —
+  // there is no second formatting for a bug to hide behind.
+  const unsubShellLog = subscribeLog((name, _ts, line) => {
+    const entry = parseShellLine(`[${name}] ${line}`)
+    if (entry) pushLogbar(entry)
   })
 
   // Change review is push-notified but pull-loaded. A payload-less revision
