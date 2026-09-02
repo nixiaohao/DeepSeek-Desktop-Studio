@@ -27,6 +27,9 @@ import type { BackendLine } from './logging.js'
 import { buildView, entryFromBackend, entryFromAgent, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
 import type { LogEntry } from './log-model.js'
 import { aggregateStats, formatStatsSummary, type StatsSessionRow } from './stats-model.js'
+import { filterCommands } from './command-model.js'
+import { buildCommandList, dispatchCommand, type CommandSource } from './command-registry.js'
+import { hideCommandPalette } from './command-palette-window.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import {
   savePreferences,
@@ -84,6 +87,13 @@ export interface IpcDeps {
    * callable before any of those subsystems exist.
    */
   getDiagnosticsHost?: () => DiagnosticsHostDeps | null
+  /**
+   * Command source for the Ctrl+K palette (menu actions + scale steps), or
+   * null before the app has booted. Optional for the same reason
+   * `getDiagnosticsHost` is: registerIpc() must stay callable early, and the
+   * palette then degrades to an empty list instead of failing.
+   */
+  getPaletteSource?: () => CommandSource | null
   getAppVersion: () => string
   /**
    * Restart the backend process only. The caller (main.ts) must reload the
@@ -840,6 +850,34 @@ export function registerIpc(deps: IpcDeps): () => void {
       return { ok: false, error: (err as Error).message }
     }
   })
+
+  // ── Command palette (Ctrl+K) ──
+
+  /**
+   * Filtered + ranked commands for the query. Filtering happens HERE, not in
+   * the page: command-model.ts is unit-tested, and the sandboxed palette
+   * renderer never needs the raw list at all.
+   */
+  ipcMain.handle('palette:query', (_e, q: unknown) => {
+    const src = deps.getPaletteSource?.() ?? null
+    if (!src) return []
+    return filterCommands(buildCommandList(src), typeof q === 'string' ? q : '')
+  })
+
+  /**
+   * Run one command by id, then hide the palette. Hiding is the main
+   * process's job so it happens even if the renderer's own hide message lost
+   * the race with the reply.
+   */
+  ipcMain.handle('palette:run', (_e, id: unknown) => {
+    const src = deps.getPaletteSource?.() ?? null
+    if (!src) return { ok: false, error: '命令尚未就绪' }
+    const ran = dispatchCommand(src, id)
+    if (ran) hideCommandPalette()
+    return ran ? { ok: true } : { ok: false, error: '未知命令' }
+  })
+
+  ipcMain.on('palette:hide', () => hideCommandPalette())
 
   // ── Live feeds ──
 

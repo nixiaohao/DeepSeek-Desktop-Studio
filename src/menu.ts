@@ -55,6 +55,10 @@ export interface MenuActions {
    */
   openDiagnostics: () => void
 
+  // ── command palette ──
+  /** Show the Ctrl+K command palette (frameless child window). */
+  openCommandPalette: () => void
+
   // ── external editor ──
   /** Human-readable description of the current editor. */
   describeEditor: () => string
@@ -125,6 +129,11 @@ export function setupMenu(actions: MenuActions): void {
         { label: '全屏', role: 'togglefullscreen' },
         { type: 'separator' },
         // ── Overlay panel / sidebar ──
+        {
+          label: '命令面板…',
+          accelerator: 'Ctrl+K',
+          click: () => actions.openCommandPalette(),
+        },
         {
           label: '文件侧栏',
           accelerator: 'Ctrl+Alt+F',

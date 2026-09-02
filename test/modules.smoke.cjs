@@ -425,6 +425,18 @@ function requiresOf(rel) {
   assert(deps.length === 0, 'stats-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
 {
+  // The palette model is matched against what the user types at Ctrl+K —
+  // it must be loadable (and unit-testable) even when everything else is broken.
+  const deps = requiresOf('command-model.js')
+  assert(deps.length === 0, 'command-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
+{
+  // Same for the registry: it only calls the injected MenuActions closures.
+  // A runtime import here would drag Electron into the unit test.
+  const deps = requiresOf('command-registry.js')
+  assert(deps.length === 0, 'command-registry.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
+{
   // The three sandboxed bridges must require NOTHING but 'electron'.
   //
   // A local require inside a sandboxed preload throws before
@@ -434,7 +446,7 @@ function requiresOf(rel) {
   // to fix a configuration, and the logbar is where they read the logs to
   // find out why — a window whose own startup depends on the thing that is
   // broken defeats its purpose.
-  for (const rel of ['diagnostics-preload.js', 'settings-preload.js', 'logbar-preload.js']) {
+  for (const rel of ['diagnostics-preload.js', 'settings-preload.js', 'logbar-preload.js', 'command-preload.js']) {
     const deps = requiresOf(rel)
     assert(
       deps.length === 1 && deps[0] === 'electron',
@@ -509,6 +521,11 @@ const EXPECTED = [
   ['settings-window.js', 'openSettingsWindow'],
   ['settings-window.js', 'closeSettingsWindow'],
   ['settings-window.js', 'notifySettingsSaved'],
+  ['command-model.js', 'filterCommands'],
+  ['command-registry.js', 'buildCommandList'],
+  ['command-registry.js', 'dispatchCommand'],
+  ['command-palette-window.js', 'openCommandPalette'],
+  ['command-palette-window.js', 'closeCommandPalette'],
 ]
 
 for (const [rel, name] of EXPECTED) {
@@ -1052,7 +1069,7 @@ function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 178
+  const MIN_ASSERTIONS = 189
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,

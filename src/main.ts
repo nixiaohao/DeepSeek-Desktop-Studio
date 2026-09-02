@@ -21,6 +21,8 @@ import {
   loadExternalEditor,
   saveExternalEditor,
   prefsPath,
+  UI_SCALES,
+  uiScaleLabel,
 } from './preferences.js'
 import { channelDef, normalizeChannel, type ChannelId } from './channels.js'
 import { createTray, destroyTray } from './tray.js'
@@ -40,6 +42,11 @@ import { GitService } from './git-service.js'
 import { SidebarService } from './sidebar-service.js'
 import { openDiagnosticsWindow, closeDiagnosticsWindow } from './diagnostics-window.js'
 import { openSettingsWindow, closeSettingsWindow } from './settings-window.js'
+import {
+  openCommandPalette,
+  closeCommandPalette,
+  setPaletteParentAccessor,
+} from './command-palette-window.js'
 
 // ── Startup hardening (must run before app ready) ──
 // 1. GPU 加速在虚拟机/远程桌面/部分驱动上会导致白屏或启动崩溃，本应用为 Web UI 外壳，无需 GPU。
@@ -361,6 +368,8 @@ function quitApp(): void {
   // Same reason as the diagnostics window: its own BrowserWindow would keep
   // the app alive after the main window is gone.
   closeSettingsWindow()
+  // Same shape again (frameless child window, process-lifetime handle).
+  closeCommandPalette()
   try {
     if (mainWindow) {
       const b = mainWindow.getBounds()
@@ -835,6 +844,10 @@ function buildMenuActions(): MenuActions {
       openDiagnosticsWindow()
     },
 
+    openCommandPalette: () => {
+      openCommandPalette()
+    },
+
     describeEditor: () => describeEditorConfig(loadExternalEditor()),
     chooseEditor: () => {
       pickEditorInteractively(mainWindow)
@@ -896,6 +909,8 @@ app.whenReady().then(async () => {
 
   // All IPC lives in ipc-registry.ts now. main.ts had grown past 700 lines and
   // every new panel action meant touching it.
+  // The palette needs its parent window to position over and close with.
+  setPaletteParentAccessor(() => windowManager?.window ?? null)
   teardownIpc = registerIpc({
     getWindowManager: () => windowManager,
     getHealthMonitor: () => healthMonitor,
@@ -929,6 +944,14 @@ app.whenReady().then(async () => {
         }
       },
       views: () => windowManager?.viewStates() ?? {},
+    }),
+
+    // Command palette. The actions are the SAME closures the menu uses (a
+    // fresh build each query — cheap, and the toggles always see current
+    // prefs), so the palette can never offer an action the menu cannot do.
+    getPaletteSource: () => ({
+      actions: buildMenuActions(),
+      scales: UI_SCALES.map((s) => ({ value: s, label: uiScaleLabel(s) })),
     }),
   })
 

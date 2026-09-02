@@ -102,6 +102,18 @@ const BRIDGES = [
     html: [path.join('assets', 'logbar.html')],
     minMethods: 4,
   },
+  // The Ctrl+K command palette. SANDBOXED like settings/diagnostics (the
+  // command list is main-process data, built by command-registry.ts), floor 3
+  // because the bridge is exactly query/run/hide — anything else belongs in
+  // the main process, not in a palette that must open instantly.
+  {
+    name: 'palette',
+    preload: 'command-preload.ts',
+    world: 'dshPalette',
+    ns: 'palette:',
+    html: [path.join('assets', 'command-palette.html')],
+    minMethods: 3,
+  },
 ]
 
 /**
@@ -523,6 +535,7 @@ const TYPE_SCALE_PAGES = [
   path.join('assets', 'diagnostics.html'),
   path.join('assets', 'settings.html'),
   path.join('assets', 'logbar.html'),
+  path.join('assets', 'command-palette.html'),
 ]
 
 for (const asset of TYPE_SCALE_PAGES) {

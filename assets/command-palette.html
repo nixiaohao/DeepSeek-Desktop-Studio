@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!-- 'unsafe-inline' is required: the logic is an inline <script>, and
+     script-src 'self' alone makes Chromium drop it silently — the palette
+     would render but never list a command. Same note as panel.html. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline';" />
+<title>命令面板</title>
+<style>
+  :root {
+    --bg: #1a1d26;
+    --border: #272b36;
+    --fg: #d6dae3;
+    --dim: #8b93a7;
+    --accent: #4c8dff;
+    --sel: #22262f;
+    /* Type scale, same contract as the other shell pages: the user's
+       面板字号 choice applies here too. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --font-sans: "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-sans); font-size: var(--fs-md); line-height: 1.45;
+    border: 1px solid var(--border); border-radius: 6px;
+    user-select: none;
+  }
+  #wrap { display: flex; flex-direction: column; height: 100%; }
+  /* Chromium form controls do not inherit body font — explicit token, per contract. */
+  input { font-family: var(--font-sans); font-size: var(--fs-base); }
+  #query {
+    background: transparent; color: var(--fg); border: none; outline: none;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 14px; font-family: var(--font-sans); font-size: var(--fs-base);
+  }
+  #query::placeholder { color: var(--dim); }
+  #list { flex: 1; overflow-y: auto; padding: 6px 0; }
+  .row {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 7px 14px; cursor: pointer;
+  }
+  .row.active { background: var(--sel); }
+  .row .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .title b { color: #fff; font-weight: 600; }
+  .row .hint { color: var(--dim); font-size: var(--fs-sm); white-space: nowrap; }
+  .empty { color: var(--dim); padding: 14px; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <input id="query" type="text" placeholder="输入命令名，↑↓ 选择，回车执行，Esc 关闭…" autocomplete="off" spellcheck="false" />
+    <div id="list"></div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var api = window.dshPalette;
+  if (!api) return;
+
+  var input = document.getElementById('query');
+  var listEl = document.getElementById('list');
+  var items = [];        // last rendered matches, in render order
+  var active = 0;        // highlighted row index
+
+  function render(matches) {
+    items = Array.isArray(matches) ? matches : [];
+    active = 0;
+    listEl.textContent = '';
+    if (items.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'empty';
+      none.textContent = '没有匹配的命令';
+      listEl.appendChild(none);
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var m = items[i];
+      var row = document.createElement('div');
+      row.className = 'row' + (i === active ? ' active' : '');
+      row.dataset.index = String(i);
+
+      var title = document.createElement('span');
+      title.className = 'title';
+      // Matched characters are bolded via the ranges the main process
+      // computed; a plain textContent build (no innerHTML) keeps a hostile
+      // title from ever becoming markup.
+      var ranges = Array.isArray(m.ranges) ? m.ranges : [];
+      var t = String(m.command.title || '');
+      for (var c = 0; c < t.length; c++) {
+        if (ranges.indexOf(c) >= 0) {
+          var b = document.createElement('b');
+          b.textContent = t[c];
+          title.appendChild(b);
+        } else {
+          title.appendChild(document.createTextNode(t[c]));
+        }
+      }
+
+      var hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = m.command.hint ? String(m.command.hint) : '';
+
+      row.appendChild(title);
+      row.appendChild(hint);
+      row.onclick = (function (idx) { return function () { run(idx); }; })(i);
+      row.onmousemove = (function (idx) { return function () { setActive(idx); }; })(i);
+      listEl.appendChild(row);
+    }
+  }
+
+  function setActive(index) {
+    if (index < 0 || index >= items.length) return;
+    active = index;
+    var rows = listEl.querySelectorAll('.row');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle('active', i === active);
+    }
+    var el = rows[active];
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  function refresh() {
+    var q = input.value;
+    api.query(q).then(render).catch(function () {});
+  }
+
+  function run(index) {
+    var m = items[index];
+    if (!m) return;
+    api.run(m.command.id);
+    // The main process hides the window on success; hiding here too keeps the
+    // palette instant even if the reply is slow.
+    api.hide();
+  }
+
+  input.addEventListener('input', refresh);
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      api.hide();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (items.length) setActive((active + 1) % items.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (items.length) setActive((active - 1 + items.length) % items.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      run(active);
+    }
+  });
+
+  // Initial full list; focus the input so typing filters immediately.
+  refresh();
+  window.addEventListener('focus', function () { input.focus(); });
+  input.focus();
+})();
+</script>
+</body>
+</html>
