@@ -783,11 +783,52 @@ async function checkDiagnosticsIpc() {
   }
 }
 
+/**
+ * Static guard for the overlay layout policy.
+ *
+ * The user reported "打开侧栏会严重挤压主窗体的内容" when the sidebar
+ * added its 280px on top of the dsh file tree's 200px. The decision (see
+ * window-manager.ts refreshAvoidance) is now: the sidebar OVERLAPS the dsh
+ * file tree, so the chat column does not move. This is a static check on
+ * the compiled lib-new/window-manager.js because the behaviour is a
+ * function of the CSS string the function builds, not its public surface,
+ * and any regression here is silent from the user's side — the chat
+ * column just shrinks again.
+ */
+async function checkLayoutPolicy() {
+  const wm = fs.readFileSync(path.join(LIB, 'window-manager.js'), 'utf-8')
+  // Strip block + line comments. String literals and template strings stay
+  // intact: the test wants to see the template-literal interpolation that
+  // the function builds, not the runtime value, and stripping them would
+  // destroy the very `${right}` we want to assert on.
+  const code = wm
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+
+  // The left padding must be a literal 0: a future regression that
+  // re-introduces `const left = this.sidebarWidthNow()` would re-create
+  // the squeeze the user reported (sidebar + injected padding = chat
+  // column squeezed by 280px on top of the dsh file tree's 200px).
+  assert(
+    /const\s+left\s*=\s*0\s*[;,]/.test(code),
+    'window-manager: refreshAvoidance pins `left` to a literal 0',
+    'window-manager.js no longer pins padding-left to 0 — the sidebar may once again push the chat column rightward'
+  )
+  // And the CSS template must still be hooked up: `padding-right:${right}px`
+  // remains so the right panel still pushes the chat column to keep it
+  // visible. The template literal preserves the `${right}` interpolation.
+  assert(
+    /padding-right:\$\{right\}px/.test(code),
+    'window-manager: refreshAvoidance still injects padding-right from the panel width',
+    'window-manager.js no longer pads the right side for the panel — the panel would cover the chat column'
+  )
+}
+
 function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 75
+  const MIN_ASSERTIONS = 78
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,
@@ -807,6 +848,11 @@ checkBatchGuard()
   .catch((err) => {
     fail += 1
     console.error(`  FAIL diagnostics ipc threw: ${err && err.message}`)
+  })
+  .then(checkLayoutPolicy)
+  .catch((err) => {
+    fail += 1
+    console.error(`  FAIL layout policy threw: ${err && err.message}`)
   })
   .then(finalize)
 

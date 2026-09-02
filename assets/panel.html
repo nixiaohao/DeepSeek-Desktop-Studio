@@ -40,17 +40,24 @@
   }
 
   /* Left edge drag handle → resizes the whole panel via the main process.
-     A 1px line on the right side of the resizer is always visible: the seam
+     A 2px line on the right side of the resizer is always visible: the seam
      between the panel and the dsh page used to read as a dead gap, and a
-     4px hit target that only lights up on hover is invisible until you
-     happen to land on it. The full strip goes accent on hover/drag. */
+     1px line in var(--border) (#272b36) on the dsh dark background had a
+     brightness contrast of only ~9% — practically invisible. Using
+     var(--fg-dim) (#8b93a7) raises that to ~50% so the boundary is obvious
+     at a glance, and a faint accent glow makes it pop without dominating
+     the layout. The full strip goes accent on hover/drag. */
   #resizer {
     width: 6px; cursor: ew-resize; flex: none;
     background: linear-gradient(to right,
-      transparent 0, transparent 5px,
-      var(--border) 5px, var(--border) 6px);
+      transparent 0, transparent 4px,
+      var(--fg-dim) 4px, var(--fg-dim) 6px);
+    box-shadow: 0 0 6px rgba(76, 141, 255, 0.22);
   }
-  #resizer:hover, #resizer.dragging { background: var(--accent); }
+  #resizer:hover, #resizer.dragging {
+    background: var(--accent);
+    box-shadow: 0 0 10px rgba(76, 141, 255, 0.45);
+  }
 
   #app { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 

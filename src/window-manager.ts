@@ -348,22 +348,28 @@ export class WindowManager {
   /**
    * Inject CSS padding so the dsh page reflows out from under the overlays.
    * No-op when disabled or when nothing is shown.
+   *
+   * The right padding is the panel width: the panel sits on top of the dsh
+   * webview and would otherwise cover the chat column. The LEFT padding is
+   * always zero: the sidebar overlaps the dsh file tree rather than pushing
+   * the chat column rightward. Pushing the chat column when the sidebar is
+   * shown was reported as "严重挤压主窗体内容" — the user opens the sidebar
+   * for the file/git tooling, not to shrink what they were already reading.
+   * The dsh file tree is the part the sidebar replaces; everything to its
+   * right (icon strip + chat) keeps its original position.
    */
   async refreshAvoidance(): Promise<void> {
     if (!this.prefs.avoidCss) {
       await this.clearAvoidance()
       return
     }
-    const left = this.prefs.sidebarVisible ? this.sidebarWidthNow() : 0
+    const left = 0
     const right = this.prefs.visible ? this.prefs.width : 0
     const bottom = this.prefs.statusVisible ? STATUS_BAR_HEIGHT : 0
 
     await this.clearAvoidance()
     if (left === 0 && right === 0 && bottom === 0) return
 
-    // `padding-left` is what keeps the dsh page from sliding under the
-    // sidebar. It is only correct while the sidebar is actually that wide —
-    // see sidebarWidthNow().
     const css =
       `html{padding-left:${left}px!important;padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}` +
       `body{padding-left:${left}px!important;padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}`

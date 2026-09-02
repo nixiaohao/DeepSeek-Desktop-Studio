@@ -355,6 +355,89 @@ for (const asset of ALL_PAGES) {
   )
 }
 
+// ── 3b. Resizer visibility (panel + sidebar) ──────────────────────────
+
+/**
+ * The drag handle between an overlay and the dsh page is a 6px strip, and
+ * most of that is invisible — it is the 2px on the seam side that has to be
+ * visible enough for the user to register "there is a boundary here, and it
+ * is draggable". A 1px var(--border) line is 24/255 brighter than the
+ * background (9% contrast) and the user reads it as a dead gap, not a
+ * handle — the file panel then looks like it floats in space. Anything less
+ * than 2px of a high-contrast colour, or no box-shadow, fails this contract.
+ *
+ * statusbar.html / diagnostics.html do not have a resizer and are skipped.
+ */
+console.log('panel-api: resizer visibility')
+
+const RESIZER_PAGES = [path.join('assets', 'panel.html'), path.join('assets', 'sidebar.html')]
+
+for (const asset of RESIZER_PAGES) {
+  const html = read(asset)
+  // Match the #resizer { ... } block. `[\s\S]` instead of `.` so newlines match.
+  const resizerBlock = /#resizer\s*\{([^}]*)\}/m.exec(html)
+  assert(
+    resizerBlock !== null,
+    `${asset}: declares a #resizer block`,
+    `${asset} must define a #resizer; without it the user cannot tell the overlay is draggable`
+  )
+  if (!resizerBlock) continue
+  const body = resizerBlock[1]
+  // The seam colour: must be a high-contrast token (fg-dim / fg / accent) and
+  // not the low-contrast border token alone.
+  const usesHighContrast = /var\(--fg-dim\)|var\(--fg\)|var\(--accent\)|#[89a-f0-9]{3,8}/i.test(body)
+  assert(
+    usesHighContrast,
+    `${asset}: #resizer uses a high-contrast colour`,
+    `${asset} #resizer only references low-contrast tokens — the seam will be invisible on the dsh dark background`
+  )
+  // A 1px line on a dark background disappears; 2px is the floor.
+  // Rather than parse the linear-gradient (whose stops contain var(...) calls
+  // with their own commas, making a naive split unsafe), assert the contract
+  // by shape: the background must be a linear-gradient with a stop pair that
+  // leaves ≥2px of solid colour at the seam. A solid background also
+  // satisfies the contract (all of it is visible) but is rejected below for
+  // the hover/fill reason — a solid background cannot also be var(--accent)
+  // on hover without an extra declaration, and the seam must read as
+  // "boundary, not block".
+  const isGradient = /background\s*:\s*linear-gradient\(/i.test(body)
+  const isSolid = /background\s*:\s*var\(--fg-dim\)|var\(--accent\)|var\(--fg\)|background-color\s*:/i.test(body)
+  // For gradients: walk the text and find the LAST transparent boundary and
+  // the LAST opaque boundary. The visible strip is the gap between them.
+  // "transparent 0" is valid CSS (unit defaults to px), so the unit is
+  // optional; opaque stops are always written with px in this codebase.
+  let widthOk = false
+  if (isGradient) {
+    const transparentStops = [...body.matchAll(/transparent\s+(\d+(?:\.\d+)?)(?:px)?/gi)].map((mm) => Number(mm[1]))
+    const opaqueStops = [...body.matchAll(/(?:var\(--fg-dim\)|var\(--accent\)|var\(--fg\))\s+(\d+(?:\.\d+)?)px/gi)].map((mm) => Number(mm[1]))
+    if (transparentStops.length > 0 && opaqueStops.length > 0) {
+      // The opaque strip starts at max(transparentStops) and ends at
+      // max(opaqueStops). For a left-to-right seam the visible width is the
+      // distance from the last transparent boundary to the LAST opaque stop
+      // (the resizer's right edge in the current CSS).
+      const lastTransparent = transparentStops[transparentStops.length - 1]
+      const lastOpaque = opaqueStops[opaqueStops.length - 1]
+      const visible = lastOpaque - lastTransparent
+      widthOk = visible >= 2
+    }
+  } else if (isSolid) {
+    widthOk = true
+  }
+  assert(
+    widthOk,
+    `${asset}: #resizer draws ≥2px of visible colour at the seam`,
+    `${asset} #resizer draws <2px at the seam — too thin to read on the dsh dark background (1px var(--border) was the original bug)`
+  )
+  // Hover/drag: must upgrade to accent, not stay at the seam colour.
+  const hoverBlock = /#resizer:hover[^{]*\{([^}]*)\}/i.exec(html)
+  const hoverUsesAccent = hoverBlock && /var\(--accent\)/.test(hoverBlock[1])
+  assert(
+    hoverUsesAccent,
+    `${asset}: #resizer hover/drag fills with var(--accent)`,
+    `${asset} #resizer hover/drag block is missing or does not use var(--accent); the user gets no feedback on grab`
+  )
+}
+
 // ── 4. Every inline script must actually parse ──
 
 console.log('panel-api: inline script syntax')

@@ -32,18 +32,23 @@
   }
 
   /* Right-edge drag handle → resizes the sidebar via the main process.
-     A 1px line on the right side of the resizer is always visible: without
+     A 2px line on the right side of the resizer is always visible: without
      it the seam between the sidebar and the dsh page reads as a dead gap
      (the user reported the same problem with the right monitor panel), and
-     a 4px hit target that only lights up on hover is invisible until you
-     happen to land on it. The full strip goes accent on hover/drag. */
+     a 1px line in var(--border) (#272b36) on the dsh dark background had a
+     brightness contrast of only ~9% — practically invisible. The full strip
+     goes accent on hover/drag. */
   #resizer {
     width: 6px; cursor: ew-resize; flex: none; margin-left: auto;
     background: linear-gradient(to right,
-      transparent 0, transparent 5px,
-      var(--border) 5px, var(--border) 6px);
+      transparent 0, transparent 4px,
+      var(--fg-dim) 4px, var(--fg-dim) 6px);
+    box-shadow: 0 0 6px rgba(76, 141, 255, 0.22);
   }
-  #resizer:hover, #resizer.dragging { background: var(--accent); }
+  #resizer:hover, #resizer.dragging {
+    background: var(--accent);
+    box-shadow: 0 0 10px rgba(76, 141, 255, 0.45);
+  }
 
   #app { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 

@@ -75,18 +75,24 @@ interface Preferences {
 
 /** Sensible starting geometry for the panel. */
 export const DEFAULT_PANEL_PREFS: PanelPrefs = {
-  // Starts hidden: the user asked for the panel to be openable from the menu
-  // rather than permanently docked, which also means it cannot occlude the dsh
-  // UI before it is wanted.
-  visible: false,
-  width: 340,
+  // The panel starts visible. It is a first-class piece of the IDE shell,
+  // not a popup the user has to remember exists. Still toggleable from the
+  // menu — the default is "on", not "pinned".
+  visible: true,
+  // Slightly narrower than the prior 340: it had been squeezing the chat
+  // column on 1280-wide windows. 320 leaves ~960px for the dsh webview
+  // (sidebar 240 + panel 320 + chat ~720).
+  width: 320,
   monitorHeight: 220,
   statusVisible: true,
   avoidCss: true,
-  // Starts hidden, same reasoning as the panel: it is opened from the menu,
-  // and must not cover the dsh UI before it is asked for.
-  sidebarVisible: false,
-  sidebarWidth: 280,
+  // The sidebar REPLACES the dsh file tree (it overlays it on top, see
+  // window-manager.ts refreshAvoidance — no padding-left is injected), so
+  // showing it by default does not steal space from anything the user was
+  // already looking at. 240px covers the dsh tree's 200px + its 40px gap to
+  // the icon strip without overlapping the icon strip itself.
+  sidebarVisible: true,
+  sidebarWidth: 240,
 }
 
 const DEFAULTS: Preferences = {
