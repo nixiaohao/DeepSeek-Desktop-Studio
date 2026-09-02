@@ -35,6 +35,7 @@ function fakeActions() {
       togglePanel: rec('togglePanel'),
       toggleStatusBar: rec('toggleStatusBar'),
       toggleLogbar: rec('toggleLogbar'),
+      setLayout: (id) => calls.push(`setLayout:${id}`),
       setUiScale: (s) => calls.push(`setUiScale:${s}`),
       restartBackend: rec('restartBackend'),
       openLogs: rec('openLogs'),
@@ -101,6 +102,17 @@ test('each fixed id dispatches to exactly its action', () => {
     const { calls, actions } = fakeActions()
     assert.strictEqual(dispatchCommand({ actions, scales }, id), true, `dispatch ${id}`)
     assert.deepStrictEqual(calls, [expected], `${id} must call ${expected}`)
+  }
+  // Layout presets: one id each, dispatching with the preset name.
+  const layoutMap = {
+    'layout-focus': 'focus',
+    'layout-classic': 'classic',
+    'layout-minimal': 'minimal',
+  }
+  for (const [id, preset] of Object.entries(layoutMap)) {
+    const { calls, actions } = fakeActions()
+    assert.strictEqual(dispatchCommand({ actions, scales }, id), true, `dispatch ${id}`)
+    assert.deepStrictEqual(calls, [`setLayout:${preset}`], `${id} must apply preset ${preset}`)
   }
 })
 

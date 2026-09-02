@@ -461,13 +461,19 @@ check('kept projection keys are stored and flattened by projectionEntries', () =
   const s = new EventStore()
   s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: { llmMs: 1000 }, seq: 3 })
   s.feed({ type: 'session/projection', sessionId: 'm', key: 'tokenUsage', value: { outputTokens: 5 }, seq: 2 })
+  // The session-overview keys are kept too (context occupancy + composition).
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'contextPressure', value: { contextWindow: 1000, pressureTokens: 120 }, seq: 4 })
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'contextBreakdown', value: { systemTokens: 500, toolsTokens: 1200, messageTokens: 3000 }, seq: 5 })
   // An unkept key must not be stored — a chatty future projection cannot grow
   // the store.
-  s.feed({ type: 'session/projection', sessionId: 'm', key: 'contextPressure', value: {}, seq: 9 })
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'someFutureProjection', value: {}, seq: 9 })
   const flat = s.projectionEntries()
-  assert.strictEqual(flat.length, 2)
+  assert.strictEqual(flat.length, 4)
   assert.ok(flat.some((p) => p.key === 'sessionStats' && p.value.llmMs === 1000))
   assert.ok(flat.some((p) => p.key === 'tokenUsage' && p.value.outputTokens === 5))
+  assert.ok(flat.some((p) => p.key === 'contextPressure' && p.value.contextWindow === 1000))
+  assert.ok(flat.some((p) => p.key === 'contextBreakdown' && p.value.toolsTokens === 1200))
+  assert.ok(!flat.some((p) => p.key === 'someFutureProjection'))
 })
 
 check('a lower-seq projection replay never rolls the fold backwards', () => {

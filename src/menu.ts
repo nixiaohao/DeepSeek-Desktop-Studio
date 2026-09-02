@@ -37,6 +37,12 @@ export interface MenuActions {
   toggleSidebar: () => void
   /** Show/hide the bottom log panel. The menu is rebuilt afterwards to re-mark it. */
   toggleLogbar: () => void
+  /**
+   * Apply a named layout preset ('focus' | 'classic' | 'minimal') — a
+   * sidebar/panel/logbar visibility triple in one click. The menu is rebuilt
+   * afterwards so the checkbox marks match reality.
+   */
+  setLayout: (id: string) => void
   /** Resize the shell's fonts. The menu is rebuilt afterwards to re-mark it. */
   setUiScale: (scale: UiScale) => void
 
@@ -167,6 +173,17 @@ export function setupMenu(actions: MenuActions): void {
         // Radio group, not a checkbox: it selects one of four discrete steps,
         // and a radio is the only control that shows "which one is active"
         // without the user opening the menu and reading the labels.
+        {
+          label: '布局预设',
+          submenu: ([
+            ['focus', '专注（只留对话与监控）'],
+            ['classic', '经典（侧栏 + 监控）'],
+            ['minimal', '极简（只留对话）'],
+          ] as const).map<MenuItemConstructorOptions>(([id, label]) => ({
+            label,
+            click: () => actions.setLayout(id),
+          })),
+        },
         {
           label: '面板字号',
           submenu: UI_SCALES.map<MenuItemConstructorOptions>((s) => ({

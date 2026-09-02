@@ -10,6 +10,7 @@
 const assert = require('node:assert/strict')
 const {
   aggregateStats,
+  aggregateOverview,
   formatDuration,
   formatTokens,
   formatStatsSummary,
@@ -107,6 +108,73 @@ check('formatStatsSummary renders the readable line in a fixed order', () => {
 
 check('formatStatsSummary drops quiet groups instead of showing zeros', () => {
   assert.equal(formatStatsSummary({ llmMs: 0, toolMs: 0, steps: 0, tokensIn: 0, tokensOut: 0, agentsTotal: 3, agentsRunning: 0, agentsSub: 0 }), '')
+})
+
+// ── aggregateOverview (panel 会话概览 tab) ──
+
+const overviewRow = (over) => over
+
+check('empty overview input yields zeros and null ratios', () => {
+  const o = aggregateOverview([])
+  assert.equal(o.contextUsed, 0)
+  assert.equal(o.contextWindow, null)
+  assert.equal(o.contextPercent, null)
+  assert.equal(o.hitRate, null)
+  assert.deepEqual(o.tokens, { uncachedInput: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+  assert.equal(o.breakdown, null)
+})
+
+check('hit rate derives from cacheRead over total input', () => {
+  const o = aggregateOverview([overviewRow({
+    usage: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 300, cacheWriteTokens: 20 },
+  })])
+  assert.equal(o.hitRate, 75) // 300 / (300+100)
+  assert.deepEqual(o.tokens, { uncachedInput: 100, output: 50, cacheRead: 300, cacheWrite: 20 })
+})
+
+check('no input at all leaves hitRate null instead of NaN', () => {
+  const o = aggregateOverview([overviewRow({ usage: { outputTokens: 5 } })])
+  assert.equal(o.hitRate, null)
+})
+
+check('context occupancy prefers pressureTokens and reports percent of window', () => {
+  const o = aggregateOverview([overviewRow({
+    contextPressure: { contextWindow: 1000, pressureTokens: 120, surfaceTokens: 90 },
+  })])
+  assert.equal(o.contextUsed, 120)
+  assert.equal(o.contextWindow, 1000)
+  assert.equal(o.contextPercent, 12)
+})
+
+check('context falls back to surfaceTokens when pressure is absent', () => {
+  const o = aggregateOverview([overviewRow({
+    contextPressure: { surfaceTokens: 90 },
+  })])
+  assert.equal(o.contextUsed, 90)
+  assert.equal(o.contextWindow, null)
+  assert.equal(o.contextPercent, null)
+})
+
+check('across sessions tokens sum and the smallest window binds', () => {
+  const o = aggregateOverview([
+    overviewRow({ usage: { uncachedInputTokens: 10, cacheReadTokens: 90 }, contextPressure: { contextWindow: 2000, pressureTokens: 500 } }),
+    overviewRow({ usage: { uncachedInputTokens: 30, outputTokens: 7, cacheReadTokens: 10 }, contextPressure: { contextWindow: 1000, pressureTokens: 800 } }),
+  ])
+  assert.deepEqual(o.tokens, { uncachedInput: 40, output: 7, cacheRead: 100, cacheWrite: 0 })
+  assert.equal(o.contextWindow, 1000)
+  assert.equal(o.contextUsed, 800)
+  assert.equal(o.contextPercent, 80)
+})
+
+check('breakdown sums composition; junk fields contribute zero', () => {
+  const o = aggregateOverview([
+    overviewRow({ contextBreakdown: { systemTokens: 500, toolsTokens: 1200, messageTokens: 3000 } }),
+    overviewRow({ contextBreakdown: { systemTokens: 'x', toolsTokens: null, messageTokens: 200 } }),
+    overviewRow(null),
+    overviewRow({ usage: { uncachedInputTokens: NaN } }),
+  ])
+  assert.deepEqual(o.breakdown, { system: 500, tools: 1200, messages: 3200 })
+  assert.equal(o.tokens.uncachedInput, 0)
 })
 
 console.log(`stats-model.unit: ${checks} checks passed`)

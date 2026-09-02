@@ -98,6 +98,26 @@
   .row .src { color: var(--accent); }
   .row.err .text { color: var(--err); }
   .row.fatal .src { color: var(--err); font-weight: 600; }
+  /* Clickable file paths inside a row (panel 运行监控 capability moved here). */
+  a.path { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); cursor: pointer; }
+  a.path:hover { background: rgba(76,141,255,.15); }
+  /* Path context menu (same shape as the panel's old one). */
+  #path-menu {
+    position: fixed; display: none; z-index: 50; background: #22262f;
+    border: 1px solid var(--border); border-radius: 4px; padding: 3px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 210px;
+  }
+  #path-menu .path-text {
+    padding: 5px 9px; font-size: var(--fs-sm); color: var(--dim);
+    border-bottom: 1px solid var(--border); margin-bottom: 3px;
+    word-break: break-all; user-select: text;
+  }
+  #path-menu button {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    color: var(--fg); padding: 4px 8px; border-radius: 3px;
+    font-size: var(--fs-sm); font-family: var(--font-ui); cursor: pointer;
+  }
+  #path-menu button:hover { background: var(--accent); color: #fff; }
 </style>
 </head>
 <body>
@@ -107,6 +127,7 @@
     <span id="chips"></span>
     <span class="spacer"></span>
     <label class="chk"><input type="checkbox" id="chk-autoscroll" checked />自动滚动</label>
+    <button id="btn-clear" title="清空当前视图（不影响日志文件）">清空</button>
     <button id="btn-dir" title="在文件管理器中打开日志文件夹">打开日志目录</button>
   </header>
   <div id="no-bridge">
@@ -114,6 +135,12 @@
     %APPDATA%\deepseek-studio\logs\，可通过菜单「视图 → 打开日志文件夹」直达。
   </div>
   <div id="lines"><div class="empty">加载中…</div></div>
+  <div id="path-menu">
+    <div class="path-text"></div>
+    <button data-act="edit">用外部编辑器打开</button>
+    <button data-act="reveal">在文件管理器中显示</button>
+    <button data-act="copy">复制路径</button>
+  </div>
 
 <script>
 (function () {
@@ -151,11 +178,60 @@
     src.textContent = '[' + (labels[e.source] || e.source) + '] ';
     var text = document.createElement('span');
     text.className = 'text';
-    text.textContent = e.text;
+    renderText(text, e.text);
     row.appendChild(t);
     row.appendChild(src);
     row.appendChild(text);
     return row;
+  }
+
+  // ── clickable file paths ─────────────────────────────────────────────
+  // Hits are computed per batch in the main process (sandboxed preload) and
+  // cached by exact text; a cache miss renders plain text, and the batch
+  // result triggers one cheap re-render.
+
+  var pathCache = {};   // line text -> hits[{index,length,text}]
+  var pathPending = {}; // texts already requested
+
+  function renderText(el, text) {
+    var hits = pathCache[text];
+    if (!hits || !hits.length) { el.textContent = text; return; }
+    var pos = 0;
+    for (var i = 0; i < hits.length; i++) {
+      var h = hits[i];
+      if (h.index > pos) el.appendChild(document.createTextNode(text.slice(pos, h.index)));
+      var a = document.createElement('a');
+      a.className = 'path';
+      a.textContent = h.text;
+      a.title = '点击选择操作';
+      a.dataset.path = h.text;
+      el.appendChild(a);
+      pos = h.index + h.length;
+    }
+    if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
+  }
+
+  function requestPaths(entries) {
+    if (!api.findPathsBatch) return;
+    var unseen = [];
+    for (var i = 0; i < entries.length; i++) {
+      var txt = entries[i].text;
+      if (txt && !(txt in pathCache) && !(txt in pathPending)) unseen.push(txt);
+    }
+    if (!unseen.length) return;
+    for (var j = 0; j < unseen.length; j++) pathPending[unseen[j]] = true;
+    api.findPathsBatch(unseen).then(function (results) {
+      for (var k = 0; k < unseen.length; k++) {
+        pathCache[unseen[k]] = (results && results[k]) || [];
+        delete pathPending[unseen[k]];
+      }
+      scheduleRender();
+    }).catch(function () {
+      for (var k = 0; k < unseen.length; k++) {
+        pathCache[unseen[k]] = [];
+        delete pathPending[unseen[k]];
+      }
+    });
   }
 
   function visible() {
@@ -192,6 +268,7 @@
     if (!list || !list.length) return;
     for (var i = 0; i < list.length; i++) entries.push(list[i]);
     if (entries.length > MAX_KEPT) entries.splice(0, entries.length - MAX_KEPT);
+    requestPaths(list);
     scheduleRender();
   }
 
@@ -239,6 +316,56 @@
   autoscroll.onchange = function () {
     if (autoscroll.checked) linesEl.scrollTop = linesEl.scrollHeight;
   };
+
+  document.getElementById('btn-clear').onclick = function () {
+    entries.length = 0;
+    scheduleRender();
+  };
+
+  // ── path context menu (clickable file paths in rows) ───────────────────
+
+  var menuEl = document.getElementById('path-menu');
+  var menuTextEl = menuEl.querySelector('.path-text');
+  var currentPath = '';
+
+  linesEl.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a.path') : null;
+    if (!a) return;
+    e.preventDefault();
+    currentPath = a.dataset.path || a.textContent;
+    menuTextEl.textContent = currentPath;
+    menuEl.style.display = 'block';
+    var r = a.getBoundingClientRect();
+    var top = Math.min(r.bottom + 2, window.innerHeight - menuEl.offsetHeight - 4);
+    menuEl.style.top = Math.max(4, top) + 'px';
+    menuEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - menuEl.offsetWidth - 4)) + 'px';
+  });
+
+  document.addEventListener('click', function (e) {
+    if (menuEl.style.display === 'block' && !menuEl.contains(e.target)) {
+      menuEl.style.display = 'none';
+    }
+  });
+
+  menuEl.addEventListener('click', function (e) {
+    var act = e.target && e.target.dataset ? e.target.dataset.act : null;
+    if (!act) return;
+    menuEl.style.display = 'none';
+    if (act === 'copy') {
+      navigator.clipboard.writeText(currentPath).then(
+        function () { toast('已复制路径'); },
+        function () { toast('复制失败', true); }
+      );
+    } else if (act === 'edit') {
+      api.openInEditor(currentPath).then(function (r) {
+        if (r && !r.ok) toast('打开失败：' + (r.error || '未知错误'), true);
+      });
+    } else if (act === 'reveal') {
+      api.revealPath(currentPath).then(function (r) {
+        if (r && !r.ok) toast('无法显示：' + (r.error || '未知错误'), true);
+      });
+    }
+  });
 
   // ── top-edge resizer (log bar height, handled by the main process) ──────
   // Same delta pattern as panel.html's width handle: report the desired TOTAL

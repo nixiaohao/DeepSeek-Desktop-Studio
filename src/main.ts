@@ -815,6 +815,29 @@ function buildMenuActions(): MenuActions {
       windowManager?.toggleLogbar()
       rebuildMenu()
     },
+    setLayout: (id) => {
+      // A preset is a visibility triple applied in one click — the antidote
+      // to the four-column squeeze: 专注 trades the file sidebar for width,
+      // 极简 keeps only the conversation. Each setter persists its own pref,
+      // so the preset survives restarts through the usual path.
+      const wm = windowManager
+      if (!wm) return
+      if (id === 'focus') {
+        wm.setSidebarVisible(false)
+        wm.setPanelVisible(true)
+        wm.setLogbarVisible(false)
+      } else if (id === 'minimal') {
+        wm.setSidebarVisible(false)
+        wm.setPanelVisible(false)
+        wm.setLogbarVisible(false)
+      } else {
+        // 'classic' and anything unrecognized fall back to the shipped layout.
+        wm.setSidebarVisible(true)
+        wm.setPanelVisible(true)
+        wm.setLogbarVisible(false)
+      }
+      rebuildMenu()
+    },
     setUiScale: (scale) => {
       windowManager?.setUiScale(scale)
       // Rebuilt so the radio mark moves; the pages themselves are re-injected

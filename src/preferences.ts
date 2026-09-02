@@ -64,7 +64,6 @@ export interface PanelPrefs {
   /** Panel width in px. */
   width: number
   /** Height of the monitor section inside the panel (splitter position). */
-  monitorHeight: number
   /** Bottom status bar shown. */
   statusVisible: boolean
   /** Bottom log bar shown (off by default — the right panel already streams backend output). */
@@ -129,7 +128,6 @@ export const DEFAULT_PANEL_PREFS: PanelPrefs = {
   // column on 1280-wide windows. 320 leaves ~960px for the dsh webview
   // (sidebar 240 + panel 320 + chat ~720).
   width: 320,
-  monitorHeight: 220,
   statusVisible: true,
   // The log bar starts hidden: the right panel already streams backend output,
   // so a permanent bottom strip would be duplicate pixels for most users. It
@@ -219,7 +217,6 @@ export function loadPanelPrefs(): PanelPrefs {
   return {
     ...merged,
     width: num(merged.width, DEFAULT_PANEL_PREFS.width),
-    monitorHeight: num(merged.monitorHeight, DEFAULT_PANEL_PREFS.monitorHeight),
     sidebarWidth: num(merged.sidebarWidth, DEFAULT_PANEL_PREFS.sidebarWidth),
     logbarHeight: num(merged.logbarHeight, DEFAULT_PANEL_PREFS.logbarHeight),
     uiScale: normalizeUiScale(merged.uiScale),

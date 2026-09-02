@@ -144,7 +144,14 @@ const PENDING_TTL_MS = 30 * 60 * 1000
 /** How many agent-activity entries the logbar feed keeps. */
 const ACTIVITY_LIMIT = 300
 /** The only projection keys kept; everything else is a no-op. */
-const KEPT_PROJECTION_KEYS = new Set(['sessionStats', 'tokenUsage'])
+const KEPT_PROJECTION_KEYS = new Set([
+  'sessionStats',
+  'tokenUsage',
+  // Session-overview panel: context occupancy (used/window) and composition
+  // (system/tools/messages). Same higher-seq-wins rule as the other keys.
+  'contextPressure',
+  'contextBreakdown',
+])
 
 /**
  * A frame plus the envelope's rpcId. The id rides OUTSIDE the frame (it is the

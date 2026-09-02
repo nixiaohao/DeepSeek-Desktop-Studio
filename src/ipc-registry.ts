@@ -26,7 +26,7 @@ import { subscribeBackend, getBackendLines, getLogDir, getRecentLines, log, subs
 import type { BackendLine } from './logging.js'
 import { buildView, entryFromBackend, entryFromAgent, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
 import type { LogEntry } from './log-model.js'
-import { aggregateStats, formatStatsSummary, type StatsSessionRow } from './stats-model.js'
+import { aggregateStats, aggregateOverview, formatStatsSummary, type StatsSessionRow, type OverviewSessionRow } from './stats-model.js'
 import { filterCommands } from './command-model.js'
 import { buildCommandList, dispatchCommand, type CommandSource } from './command-registry.js'
 import { hideCommandPalette } from './command-palette-window.js'
@@ -58,6 +58,7 @@ import { commonTool, normalizeIds } from './approval-groups.js'
 import { collectDiagnostics } from './diagnostics-host.js'
 import type { DiagnosticsHostDeps } from './diagnostics-host.js'
 import { buildChatInsert, buildInsertScript, type ChatInsertResult } from './dsh-input.js'
+import { findPaths } from './path-links.js'
 import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
 import type { SidebarService } from './sidebar-service.js'
@@ -286,10 +287,10 @@ export function registerIpc(deps: IpcDeps): () => void {
   ipcMain.on('logs:view-ready', onViewReady)
 
   // ── Panel: backend output ──
-
-  ipcMain.handle('panel:backend-history', (_e, limit?: number) =>
-    getBackendLines(typeof limit === 'number' && limit > 0 ? limit : 200)
-  )
+  //
+  // The panel no longer renders backend output — it lives in the bottom log
+  // bar (logs:*), which merges it with shell and agent feeds. The subscribe
+  // callback below therefore only feeds the health monitor and the logbar.
 
   // ── Panel: health ──
 
@@ -394,11 +395,6 @@ export function registerIpc(deps: IpcDeps): () => void {
   })
 
   // ── Panel: geometry ──
-
-  ipcMain.handle('panel:set-monitor-height', (_e, h: number) => {
-    if (typeof h !== 'number' || !Number.isFinite(h)) return
-    savePanelPrefs({ monitorHeight: Math.max(80, Math.round(h)) })
-  })
 
   ipcMain.handle('panel:set-panel-width', (_e, w: number) => {
     if (typeof w !== 'number' || !Number.isFinite(w)) return
@@ -724,6 +720,33 @@ export function registerIpc(deps: IpcDeps): () => void {
     return err ? { ok: false, error: err } : { ok: true }
   })
 
+  // The logbar renders backend lines with clickable file paths (the panel's
+  // old 运行监控 capability moved here). Path matching stays in path-links.ts,
+  // reached over IPC because the logbar preload is sandboxed (electron only).
+  ipcMain.handle('logs:find-paths', (_e, texts: unknown) => {
+    if (!Array.isArray(texts)) return []
+    return texts.map((t) => (typeof t === 'string' ? findPaths(t) : []))
+  })
+
+  ipcMain.handle('logs:open-in-editor', async (_e, file: unknown) => {
+    if (typeof file !== 'string' || file.length === 0) {
+      return { ok: false, error: '空路径' }
+    }
+    try {
+      return await openInEditor(loadExternalEditor(), file)
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('logs:reveal-path', (_e, file: unknown) => {
+    if (typeof file !== 'string' || file.length === 0) {
+      return { ok: false, error: '空路径' }
+    }
+    shell.showItemInFolder(file)
+    return { ok: true }
+  })
+
   // The logbar page sends the desired TOTAL height while its top-edge handle
   // is dragged; setLogbarHeight clamps to LOGBAR_MIN/MAX, persists and
   // relayouts, so a burst of mousemove events costs at most one relayout each
@@ -988,12 +1011,12 @@ export function registerIpc(deps: IpcDeps): () => void {
 
   // ── Live feeds ──
 
-  // ONE subscription feeds both consumers. The health monitor deliberately
+  // ONE subscription feeds all consumers. The health monitor deliberately
   // takes its input here rather than subscribing from main.ts: two independent
-  // subscriptions would make the order in which panels and health see a line
-  // depend on registration order.
+  // subscriptions would make the order in which health and the logbar see a
+  // line depend on registration order. (The panel stopped rendering raw
+  // backend lines — they live in the logbar now.)
   const unsubBackend = subscribeBackend((line: BackendLine) => {
-    broadcast(getWindowManager(), 'panel:backend-line', line)
     getHealthMonitor()?.feedLine(line)
     pushLogbar(entryFromBackend(line))
   })
@@ -1128,6 +1151,38 @@ export function registerIpc(deps: IpcDeps): () => void {
 
   /** Initial fill for the status bar (same shape as the push: one line or ''). */
   ipcMain.handle('panel:stats-now', () => formatStatsSummary(aggregateStats(statsRows())))
+
+  /**
+   * Session-overview aggregation for the panel's 概览 tab.
+   *
+   * Same projection rows as the stats segment, plus the context keys the
+   * event-store now keeps; the arithmetic lives in stats-model.ts (pure,
+   * unit-tested), this only decides which sessions contribute.
+   */
+  const overviewRows = (): OverviewSessionRow[] => {
+    const store = deps.getStream?.()?.store
+    if (!store) return []
+    const snap = store.snapshot()
+    const bySession = new Map<string, Record<string, unknown>>()
+    for (const p of store.projectionEntries()) {
+      const row = bySession.get(p.sessionId) ?? {}
+      if (p.key === 'sessionStats') row.stats = p.value
+      else if (p.key === 'tokenUsage') row.usage = p.value
+      else if (p.key === 'contextPressure') row.contextPressure = p.value
+      else if (p.key === 'contextBreakdown') row.contextBreakdown = p.value
+      bySession.set(p.sessionId, row)
+    }
+    return [...bySession.entries()].map(([sessionId, row]) => ({
+      sessionId,
+      parentSessionId: undefined,
+      running: false,
+      usage: row.usage as OverviewSessionRow['usage'],
+      contextPressure: row.contextPressure as OverviewSessionRow['contextPressure'],
+      contextBreakdown: row.contextBreakdown as OverviewSessionRow['contextBreakdown'],
+    }))
+  }
+
+  ipcMain.handle('panel:overview-now', () => aggregateOverview(overviewRows()))
 
   const stream = deps.getStream?.() ?? null
   stream?.setOnChange(() => {

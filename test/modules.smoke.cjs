@@ -483,6 +483,7 @@ const EXPECTED = [
   ['log-model.js', 'LOG_SOURCES'],
   ['log-model.js', 'LOG_SOURCE_LABELS'],
   ['stats-model.js', 'aggregateStats'],
+  ['stats-model.js', 'aggregateOverview'],
   ['stats-model.js', 'formatDuration'],
   ['stats-model.js', 'formatTokens'],
   ['stats-model.js', 'formatStatsSummary'],
@@ -1069,7 +1070,7 @@ function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 189
+  const MIN_ASSERTIONS = 192
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,

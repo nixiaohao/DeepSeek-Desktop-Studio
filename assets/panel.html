@@ -74,6 +74,22 @@
 
   #app { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
+  /* ── tabs (变更审阅 | 会话概览) ── */
+  #tabs {
+    flex: none; display: flex; gap: 2px; padding: 4px 6px 0;
+    background: var(--bg-2); border-bottom: 1px solid var(--border);
+  }
+  #tabs .tab {
+    border: 1px solid var(--border); border-bottom: none;
+    border-radius: 4px 4px 0 0; background: transparent; color: var(--fg-dim);
+    padding: 4px 12px; font-size: var(--fs-md); font-family: var(--font-mono);
+    cursor: pointer;
+  }
+  #tabs .tab.on {
+    color: var(--fg); background: var(--bg);
+    border-color: var(--accent);
+  }
+
   section { display: flex; flex-direction: column; min-height: 0; }
   header {
     /* 30px, not 26px: the header text is now --fs-md (13px) and a 26px bar
@@ -96,10 +112,29 @@
 
   /* ── Changes area ── */
   #changes { flex: 1 1 auto; min-height: 80px; }
+  #changes.off, #overview.off { display: none; }
   #changes .body {
     flex: 1; overflow: auto; padding: 6px; color: var(--fg-dim); font-size: var(--fs-md);
     user-select: text;
   }
+
+  /* ── Overview tab (Reasonix-style session intelligence) ── */
+  #overview { flex: 1 1 auto; min-height: 80px; }
+  #overview .body { flex: 1; overflow: auto; padding: 8px; user-select: text; }
+  .card {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 10px; margin-bottom: 8px; background: var(--bg-2);
+  }
+  .card .ct { font-size: var(--fs-sm); color: var(--fg-dim); margin-bottom: 6px; }
+  .card .big { font-size: calc(16px * var(--fs-scale)); color: var(--fg); font-weight: 600; }
+  .card .row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; font-size: var(--fs-md); }
+  .card .row .k { color: var(--fg-dim); }
+  .bar {
+    height: 6px; border-radius: 3px; background: #22262f;
+    overflow: hidden; margin: 6px 0 4px;
+  }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .bar i.warn { background: var(--err); }
 
   /* A pending approval outranks the change list: it is the only thing that
      actually blocks the agent. */
@@ -184,47 +219,10 @@
   .tok-n { color: #b5cea8; } /* number  */
   .tok-a { color: #9cdcfe; } /* tag / attribute / key */
 
-  #splitter {
-    flex: none; height: 5px; cursor: ns-resize; background: var(--bg-2);
-    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
-  }
-  #splitter:hover, #splitter.dragging { background: var(--accent); }
-
-  /* ── Monitor ── */
-  #monitor { flex: none; height: 220px; }
-  #output {
-    flex: 1; overflow: auto; padding: 4px 6px; white-space: pre-wrap;
-    word-break: break-all; user-select: text;
-  }
-  .line { display: flex; gap: 6px; }
-  .line .ts { flex: none; color: #5d6377; }
-  .line .txt { flex: 1; min-width: 0; }
-  .line.err .txt { color: var(--err); }
-  .line.out .txt { color: var(--out); }
-  a.path { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); cursor: pointer; }
-  a.path:hover { background: rgba(76,141,255,.15); }
-
   .empty { color: #5d6377; padding: 8px; font-size: var(--fs-md); }
 
   label.chk { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-md); cursor: pointer; }
   label.chk input { margin: 0; }
-
-  /* ── Path context menu ── */
-  #path-menu {
-    position: fixed; display: none; z-index: 50; background: #22262f;
-    border: 1px solid var(--border); border-radius: 4px; padding: 3px;
-    box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 210px;
-  }
-  #path-menu .path-text {
-    padding: 5px 9px; font-size: var(--fs-sm); color: var(--fg-dim);
-    border-bottom: 1px solid var(--border); margin-bottom: 3px;
-    word-break: break-all; user-select: text;
-  }
-  #path-menu button {
-    display: block; width: 100%; text-align: left; border: none; background: none;
-    padding: 4px 8px; border-radius: 3px;
-  }
-  #path-menu button:hover { background: var(--accent); color: #fff; }
 
   #toast {
     position: fixed; left: 8px; bottom: 8px; background: #22262f; border: 1px solid var(--border);
@@ -238,6 +236,10 @@
   <div id="resizer" title="拖动调整面板宽度"></div>
 
   <div id="app">
+    <div id="tabs">
+      <button class="tab on" data-tab="changes">变更审阅</button>
+      <button class="tab" data-tab="overview">会话概览</button>
+    </div>
     <section id="changes">
       <header>
         <span class="title">变更审阅</span>
@@ -249,27 +251,18 @@
       </div>
     </section>
 
-    <div id="splitter" title="拖动调整监控区高度"></div>
-
-    <section id="monitor">
+    <section id="overview" class="off">
       <header>
-        <span class="title">运行监控</span>
+        <span class="title">会话概览</span>
         <span class="spacer"></span>
-        <label class="chk"><input type="checkbox" id="chk-autoscroll" checked />自动滚动</label>
-        <button id="btn-clear" title="清空当前视图（不影响日志文件）">清空</button>
-        <button id="btn-logs">日志</button>
-        <button id="btn-restart">重启服务</button>
+        <span class="hint" id="ov-status"></span>
       </header>
-      <div id="output"><div class="empty">等待后端输出…</div></div>
+      <div class="body" id="overview-body">
+        <div class="empty">等待 agent 的用量数据…</div>
+      </div>
     </section>
   </div>
 
-  <div id="path-menu">
-    <div class="path-text"></div>
-    <button data-act="edit">用外部编辑器打开</button>
-    <button data-act="reveal">在文件夹中显示</button>
-    <button data-act="copy">复制路径</button>
-  </div>
 
   <div id="toast"></div>
 
@@ -288,7 +281,7 @@
     // `preload-error` / `render-process-gone` and writes the real reason to
     // launcher.log, so point the user straight at it instead of leaving a dead
     // string on screen (which cost a whole round-trip on 2026-09-01).
-    document.getElementById('output').innerHTML =
+    document.getElementById('changes-body').innerHTML =
       '<div class="empty">面板桥接不可用（preload 未加载）。<br><br>' +
       '主进程已把真实原因写入日志：<br>' +
       '<code>%APPDATA%\\deepseek-studio\\logs\\launcher.log</code><br><br>' +
@@ -296,103 +289,12 @@
     return;
   }
 
-  var output = document.getElementById('output');
-  var autoScroll = document.getElementById('chk-autoscroll');
-  var MAX_LINES = 2000;
-  var FLUSH_MS = 100;
+  // ── change review (dsh mux stream) ─────────────────────────────────────
 
-  var pending = [];
-  var flushTimer = null;
-  var lineCount = 0;
-
-  // ── rendering ──────────────────────────────────────────────────────────
-
-  function pad(n) { return n < 10 ? '0' + n : String(n); }
-  function fmtTs(ts) {
-    var d = new Date(ts);
-    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
-  }
-
-  function clearEmpty() {
-    var e = output.querySelector('.empty');
-    if (e) e.remove();
-  }
-
-  /** Render text, turning detected file paths into clickable links. */
-  function renderText(el, text) {
-    var hits = [];
-    try { hits = api.findPaths(text) || []; } catch (e) { hits = []; }
-    if (!hits.length) { el.textContent = text; return; }
-
-    var pos = 0;
-    for (var i = 0; i < hits.length; i++) {
-      var h = hits[i];
-      if (h.index > pos) el.appendChild(document.createTextNode(text.slice(pos, h.index)));
-      var a = document.createElement('a');
-      a.className = 'path';
-      a.textContent = h.text;
-      a.title = '点击选择操作';
-      a.dataset.path = h.text;
-      el.appendChild(a);
-      pos = h.index + h.length;
-    }
-    if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
-  }
-
-  function appendLine(line) {
-    var atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
-    var div = document.createElement('div');
-    div.className = 'line ' + (line.stream === 'err' ? 'err' : 'out');
-
-    var ts = document.createElement('span');
-    ts.className = 'ts';
-    ts.textContent = fmtTs(line.ts);
-    div.appendChild(ts);
-
-    var txt = document.createElement('span');
-    txt.className = 'txt';
-    renderText(txt, line.text);
-    div.appendChild(txt);
-
-    output.appendChild(div);
-    lineCount++;
-
-    if (lineCount > MAX_LINES) {
-      output.removeChild(output.firstChild);
-      lineCount--;
-    }
-    if (atBottom && autoScroll.checked) output.scrollTop = output.scrollHeight;
-  }
-
-  function flush() {
-    flushTimer = null;
-    if (!pending.length) return;
-    clearEmpty();
-    for (var i = 0; i < pending.length; i++) appendLine(pending[i]);
-    pending.length = 0;
-    if (autoScroll.checked) output.scrollTop = output.scrollHeight;
-  }
-
-  /** Batch incoming lines: a chatty agent would otherwise thrash the DOM. */
-  function schedule(line) {
-    pending.push(line);
-    if (flushTimer !== null) return;
-    flushTimer = setTimeout(flush, FLUSH_MS);
-  }
-
-  // ── data wiring ────────────────────────────────────────────────────────
-
-  api.getBackendHistory(300).then(function (lines) {
-    if (lines && lines.length) {
-      clearEmpty();
-      for (var i = 0; i < lines.length; i++) appendLine(lines[i]);
-      output.scrollTop = output.scrollHeight;
-    }
-  }).catch(function () { /* no history is fine */ });
-
-  api.onBackendLine(schedule);
-
-  // ── actions ────────────────────────────────────────────────────────────
+  var changesBody = document.getElementById('changes-body');
+  var chgStatus = document.getElementById('chg-status');
+  var PREVIEW_LINES = 100;
+  var chgTimer = null;
 
   var toastTimer = null;
   function toast(msg, isErr) {
@@ -403,34 +305,6 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.style.display = 'none'; }, 4000);
   }
-
-  document.getElementById('btn-clear').onclick = function () {
-    output.innerHTML = '<div class="empty">已清空（日志文件不受影响）</div>';
-    lineCount = 0;
-  };
-
-  document.getElementById('btn-logs').onclick = function () {
-    api.openLogs().then(function (r) { if (r && !r.ok) toast(r.error || '打开失败', true); });
-  };
-
-  var restartBtn = document.getElementById('btn-restart');
-  restartBtn.onclick = function () {
-    restartBtn.disabled = true;
-    restartBtn.textContent = '重启中…';
-    api.restartBackend().then(function (r) {
-      restartBtn.disabled = false;
-      restartBtn.textContent = '重启服务';
-      if (r && !r.ok) toast('重启失败：' + (r.error || '未知错误'), true);
-      else toast('后端已重启（令牌已刷新，主窗口将重新加载）');
-    });
-  };
-
-  // ── change review (dsh mux stream) ─────────────────────────────────────
-
-  var changesBody = document.getElementById('changes-body');
-  var chgStatus = document.getElementById('chg-status');
-  var PREVIEW_LINES = 100;
-  var chgTimer = null;
 
   /**
    * Cheap +/- count from a bag-of-lines comparison.
@@ -744,85 +618,118 @@
     chgTimer = setTimeout(function () {
       chgTimer = null;
       api.getChanges().then(renderChanges).catch(function () { /* stream not up */ });
+      // The overview reads the same projections the rev bump just announced;
+      // piggybacking here keeps one throttle instead of one per tab.
+      pullOverview();
     }, 120);
   }
 
   api.onChangesChanged(scheduleChanges);
   scheduleChanges();
 
-  // ── path context menu ──────────────────────────────────────────────────
+  // ── tabs (变更审阅 | 会话概览) ─────────────────────────────────────────
 
-  var menu = document.getElementById('path-menu');
-  var menuPath = menu.querySelector('.path-text');
-  var currentPath = '';
-
-  output.addEventListener('click', function (e) {
-    var a = e.target.closest ? e.target.closest('a.path') : null;
-    if (!a) return;
-    e.preventDefault();
-    currentPath = a.dataset.path || a.textContent;
-    menuPath.textContent = currentPath;
-    menu.style.display = 'block';
-    var r = a.getBoundingClientRect();
-    // Keep the menu inside the viewport.
-    var top = Math.min(r.bottom + 2, window.innerHeight - menu.offsetHeight - 4);
-    menu.style.top = Math.max(4, top) + 'px';
-    menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+  var tabsEl = document.getElementById('tabs');
+  tabsEl.addEventListener('click', function (e) {
+    var t = e.target.closest ? e.target.closest('.tab') : null;
+    if (!t) return;
+    var id = t.dataset.tab;
+    for (var i = 0; i < tabsEl.children.length; i++) {
+      tabsEl.children[i].classList.toggle('on', tabsEl.children[i] === t);
+    }
+    document.getElementById('changes').classList.toggle('off', id !== 'changes');
+    document.getElementById('overview').classList.toggle('off', id !== 'overview');
+    if (id === 'overview') pullOverview();
   });
 
-  document.addEventListener('click', function (e) {
-    if (menu.style.display === 'block' && !menu.contains(e.target)) {
-      menu.style.display = 'none';
+  // ── session overview (Reasonix-style intelligence) ─────────────────────
+
+  function fmtTok(n) {
+    if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return '0';
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1000000) {
+      var k = n / 1000;
+      return (k >= 100 ? Math.round(k) : Math.round(k * 10) / 10) + 'k';
     }
-  });
+    return Math.round((n / 1000000) * 10) / 10 + 'M';
+  }
 
-  menu.addEventListener('click', function (e) {
-    var act = e.target && e.target.dataset ? e.target.dataset.act : null;
-    if (!act) return;
-    menu.style.display = 'none';
-    if (act === 'copy') {
-      navigator.clipboard.writeText(currentPath).then(
-        function () { toast('已复制路径'); },
-        function () { toast('复制失败', true); }
-      );
-    } else if (act === 'edit') {
-      api.openInEditor(currentPath).then(function (r) {
-        if (r && !r.ok) toast('打开失败：' + (r.error || '未知错误') + '（可在菜单→设置里更换编辑器）', true);
-      });
-    } else if (act === 'reveal') {
-      api.revealPath(currentPath).then(function (r) {
-        if (r && !r.ok) toast('无法显示：' + (r.error || '未知错误'), true);
-      });
+  function barRow(percent, warn) {
+    var bar = el('div', 'bar');
+    var fill = el('i');
+    fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
+    if (warn) fill.className = 'warn';
+    bar.appendChild(fill);
+    return bar;
+  }
+
+  function kvRow(k, v) {
+    var row = el('div', 'row');
+    row.appendChild(el('span', 'k', k));
+    row.appendChild(el('span', 'v', v));
+    return row;
+  }
+
+  function renderOverview(o) {
+    var body = document.getElementById('overview-body');
+    if (!o || typeof o !== 'object') return;
+    var t = o.tokens || {};
+    var nothing = !o.contextUsed && !t.uncachedInput && !t.output && !t.cacheRead && !t.cacheWrite;
+    body.textContent = '';
+
+    if (nothing) {
+      body.appendChild(el('div', 'empty', '暂无用量数据。agent 跑起来后这里会出现上下文与 token 构成。'));
+      return;
     }
-  });
 
-  // ── splitter (monitor height) ──────────────────────────────────────────
-
-  var splitter = document.getElementById('splitter');
-  var monitor = document.getElementById('monitor');
-  var MIN_H = 80;
-
-  splitter.addEventListener('mousedown', function (e) {
-    e.preventDefault();
-    splitter.classList.add('dragging');
-    var startY = e.clientY;
-    var startH = monitor.offsetHeight;
-
-    function onMove(ev) {
-      var delta = startY - ev.clientY;
-      var avail = document.getElementById('app').clientHeight - splitter.offsetHeight;
-      var h = Math.max(MIN_H, Math.min(avail - 60, startH + delta));
-      monitor.style.height = h + 'px';
+    // 上下文占用（pressureTokens，缺省退化 surfaceTokens；窗口未知时不画百分比）
+    var ctx = el('div', 'card');
+    ctx.appendChild(el('div', 'ct', '上下文'));
+    var ctxText = fmtTok(o.contextUsed);
+    if (o.contextWindow !== null && o.contextWindow !== undefined) {
+      ctxText += ' / ' + fmtTok(o.contextWindow);
     }
-    function onUp() {
-      splitter.classList.remove('dragging');
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      api.setMonitorHeight(monitor.offsetHeight);
+    ctx.appendChild(el('div', 'big', ctxText));
+    if (o.contextPercent !== null && o.contextPercent !== undefined) {
+      ctx.appendChild(barRow(o.contextPercent, o.contextPercent >= 80));
     }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
+    body.appendChild(ctx);
+
+    // 缓存命中率
+    var hit = el('div', 'card');
+    hit.appendChild(el('div', 'ct', '缓存命中率'));
+    if (o.hitRate === null || o.hitRate === undefined) {
+      hit.appendChild(el('div', 'big', '–'));
+    } else {
+      hit.appendChild(el('div', 'big', o.hitRate + '%'));
+      hit.appendChild(barRow(o.hitRate, false));
+    }
+    body.appendChild(hit);
+
+    // Token 构成
+    var tk = el('div', 'card');
+    tk.appendChild(el('div', 'ct', 'Token 构成'));
+    tk.appendChild(kvRow('输入（未命中）', fmtTok(t.uncachedInput)));
+    tk.appendChild(kvRow('输入（缓存命中）', fmtTok(t.cacheRead)));
+    tk.appendChild(kvRow('缓存写入', fmtTok(t.cacheWrite)));
+    tk.appendChild(kvRow('输出', fmtTok(t.output)));
+    body.appendChild(tk);
+
+    // 上下文构成（system / tools / messages）
+    if (o.breakdown) {
+      var bd = el('div', 'card');
+      bd.appendChild(el('div', 'ct', '上下文构成'));
+      bd.appendChild(kvRow('系统提示', fmtTok(o.breakdown.system)));
+      bd.appendChild(kvRow('工具定义', fmtTok(o.breakdown.tools)));
+      bd.appendChild(kvRow('对话消息', fmtTok(o.breakdown.messages)));
+      body.appendChild(bd);
+    }
+  }
+
+  function pullOverview() {
+    if (!api.getOverview) return;
+    api.getOverview().then(renderOverview).catch(function () { /* stream not up */ });
+  }
 
   // ── resizer (panel width, handled by the main process) ─────────────────
 
@@ -848,8 +755,9 @@
   // ── restore saved geometry ─────────────────────────────────────────────
 
   api.getPrefs().then(function (p) {
-    if (p && typeof p.monitorHeight === 'number' && p.monitorHeight > MIN_H) {
-      monitor.style.height = p.monitorHeight + 'px';
+    if (p && typeof p.panelWidth === 'number') {
+      // The main process clamps; this only nudges the first paint.
+      api.setPanelWidth(p.panelWidth);
     }
   }).catch(function () { /* defaults are fine */ });
 })();

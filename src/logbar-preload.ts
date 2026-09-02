@@ -51,6 +51,24 @@ contextBridge.exposeInMainWorld('dshLogs', {
   setHeight: (h: number): void => {
     ipcRenderer.send('logs:set-height', h)
   },
+
+  // ── clickable file paths (panel 运行监控 capability moved here) ──
+
+  /**
+   * Heuristic file-path detection for a batch of line texts, computed in the
+   * main process (path-links.ts) because this preload is sandboxed. One call
+   * per render batch keeps the IPC cost at one round-trip per flush.
+   */
+  findPathsBatch: (texts: string[]): Promise<unknown> =>
+    ipcRenderer.invoke('logs:find-paths', texts),
+
+  /** Open a path in the configured external editor. */
+  openInEditor: (file: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('logs:open-in-editor', file),
+
+  /** Show a path in the OS file manager. */
+  revealPath: (file: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('logs:reveal-path', file),
 })
 
 /**

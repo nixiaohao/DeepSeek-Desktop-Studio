@@ -33,10 +33,6 @@
  * lock-step. (Doing so once turned 20 assertions red.)
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-// Pure logic (no Electron dependency) — safe to expose to the panel page so it
-// can turn printed paths into clickable links without re-implementing the
-// matcher in HTML.
-import { findPaths } from './path-links.js'
 // PHASE_LABEL is plain data and health-monitor.ts carries no runtime imports
 // (its only import is `import type`), so this costs nothing at load time.
 import { PHASE_LABEL, type HealthPhase } from './health-monitor.js'
@@ -59,18 +55,6 @@ function off(channel: string, cb: (...args: unknown[]) => void): void {
 }
 
 contextBridge.exposeInMainWorld('dshPanel', {
-  // ── backend output feed ──
-
-  /** Live backend line. */
-  onBackendLine: (cb: (line: { ts: number; stream: 'out' | 'err'; text: string }) => void): void => {
-    ipcRenderer.on('panel:backend-line', (_e: IpcRendererEvent, line) => cb(line))
-  },
-  offBackendLine: (cb: (...args: unknown[]) => void): void => off('panel:backend-line', cb),
-
-  /** Buffered history, oldest first. */
-  getBackendHistory: (limit?: number): Promise<unknown[]> =>
-    ipcRenderer.invoke('panel:backend-history', limit),
-
   // ── health ──
 
   onHealth: (cb: (snapshot: unknown) => void): void => {
@@ -111,8 +95,10 @@ contextBridge.exposeInMainWorld('dshPanel', {
     changes: unknown[]
     approvals: unknown[]
     sessions: unknown[]
-    connected: boolean
-  }> => ipcRenderer.invoke('panel:changes-now'),
+    connected: boolean  }> => ipcRenderer.invoke('panel:changes-now'),
+
+  /** Aggregated session overview (context, hit rate, token composition). */
+  getOverview: (): Promise<unknown> => ipcRenderer.invoke('panel:overview-now'),
 
   /**
    * Allow or reject one pending approval.
@@ -193,17 +179,9 @@ contextBridge.exposeInMainWorld('dshPanel', {
 
   // ── geometry ──
 
-  setMonitorHeight: (h: number): Promise<void> =>
-    ipcRenderer.invoke('panel:set-monitor-height', h),
   setPanelWidth: (w: number): Promise<void> =>
     ipcRenderer.invoke('panel:set-panel-width', w),
   getPrefs: (): Promise<unknown> => ipcRenderer.invoke('panel:get-prefs'),
-
-  // ── helpers ──
-
-  /** Heuristic file-path detection, for clickable links in the output. */
-  findPaths: (text: string): { text: string; index: number; length: number }[] =>
-    findPaths(text),
 
   /**
    * Syntax-highlight a code preview for `filePath`, as an HTML fragment.
