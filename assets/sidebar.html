@@ -31,8 +31,18 @@
     display: flex; flex-direction: row; user-select: none;
   }
 
-  /* Right-edge drag handle → resizes the sidebar via the main process. */
-  #resizer { width: 4px; cursor: ew-resize; background: transparent; flex: none; margin-left: auto; }
+  /* Right-edge drag handle → resizes the sidebar via the main process.
+     A 1px line on the right side of the resizer is always visible: without
+     it the seam between the sidebar and the dsh page reads as a dead gap
+     (the user reported the same problem with the right monitor panel), and
+     a 4px hit target that only lights up on hover is invisible until you
+     happen to land on it. The full strip goes accent on hover/drag. */
+  #resizer {
+    width: 6px; cursor: ew-resize; flex: none; margin-left: auto;
+    background: linear-gradient(to right,
+      transparent 0, transparent 5px,
+      var(--border) 5px, var(--border) 6px);
+  }
   #resizer:hover, #resizer.dragging { background: var(--accent); }
 
   #app { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -492,7 +502,8 @@
     menuTarget = path;
     var items = isDir
       ? [['在文件管理器中显示', 'reveal'], ['设为侧栏根目录', 'root']]
-      : [['在外部编辑器中打开', 'open'], ['查看改动', 'diff'],
+      : [['添加到 dsh 对话', 'addToChat'],
+         ['在外部编辑器中打开', 'open'], ['查看改动', 'diff'],
          ['在文件管理器中显示', 'reveal'], ['复制路径', 'copy']];
     var html = '';
     for (var i = 0; i < items.length; i++) {
@@ -521,6 +532,13 @@
     else if (a === 'diff') showDiff(p);
     else if (a === 'copy') api.copyPath(p).then(function (r) { report(r, '已复制路径'); });
     else if (a === 'root') api.setRoot(p).then(function (r) { report(r); repaint(); });
+    else if (a === 'addToChat') api.addToChat(p).then(function (r) {
+      // The IPC returns the text the script actually wrote, so a confirmation
+      // toast can show the user what was inserted — useful when the @-prefix
+      // gets re-spaced by dsh's own input handling.
+      if (r && r.ok) toast('已添加到 dsh 对话：' + (r.inserted || '@' + p));
+      else report(r);
+    });
   });
 
   document.addEventListener('mousedown', function (e) {

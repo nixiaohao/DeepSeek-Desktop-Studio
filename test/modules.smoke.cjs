@@ -228,6 +228,7 @@ const MODULES = [
   'diagnostics-host.js',
   'diagnostics-preload.js',
   'diagnostics-window.js',
+  'dsh-input.js',
   'external-editor.js',
   'preferences.js',
   'logging.js',
@@ -385,6 +386,14 @@ function requiresOf(rel) {
   const deps = requiresOf('diagnostics.js')
   assert(deps.length === 0, 'diagnostics.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
+{
+  // dsh-input.ts builds a script string that is shipped to dsh's renderer
+  // via executeJavaScript. Pulling in `electron` would mean the unit test
+  // cannot load it in plain node, and the smoke harness that exercises every
+  // module in this list before any UI is wired up.
+  const deps = requiresOf('dsh-input.js')
+  assert(deps.length === 0, 'dsh-input.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
 
 // ── 3. Exported symbols other code depends on ──
 
@@ -424,6 +433,8 @@ const EXPECTED = [
   ['diagnostics-host.js', 'LOG_NAMES'],
   ['diagnostics-window.js', 'openDiagnosticsWindow'],
   ['diagnostics-window.js', 'closeDiagnosticsWindow'],
+  ['dsh-input.js', 'buildChatInsert'],
+  ['dsh-input.js', 'buildInsertScript'],
   ['menu.js', 'setupMenu'],
 ]
 

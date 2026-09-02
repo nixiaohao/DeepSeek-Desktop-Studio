@@ -102,6 +102,20 @@ contextBridge.exposeInMainWorld('dshSidebar', {
   /** Resize the sidebar (dragged from its right edge in sidebar.html). */
   setWidth: (w: number): Promise<void> => ipcRenderer.invoke('sidebar:set-width', w),
 
+  /**
+   * Insert `@<path>` into dsh's chat input so the file becomes a reference in
+   * the next user message. Best-effort: returns `{ok:false, error}` rather
+   * than throwing when dsh's textarea is not found or the main window is
+   * gone, so the sidebar can show a toast and the user can fall back to
+   * dragging the file in.
+   *
+   * The IPC handler validates the path against the sidebar's current root
+   * before any renderer-side string is built, so a stale view cannot smuggle
+   * a foreign path into the chat.
+   */
+  addToChat: (path: string): Promise<{ ok: boolean; error?: string; target?: string; inserted?: string }> =>
+    ipcRenderer.invoke('sidebar:add-to-chat', path),
+
   /** Current sidebar geometry, so the page can restore its own splitter. */
   getPrefs: (): Promise<{ sidebarWidth: number; sidebarVisible: boolean }> =>
     ipcRenderer.invoke('sidebar:get-prefs'),

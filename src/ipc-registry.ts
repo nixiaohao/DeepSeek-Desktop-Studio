@@ -30,6 +30,7 @@ import { redactTokenInText } from './redact.js'
 import { commonTool, normalizeIds } from './approval-groups.js'
 import { collectDiagnostics } from './diagnostics-host.js'
 import type { DiagnosticsHostDeps } from './diagnostics-host.js'
+import { buildChatInsert, buildInsertScript, type ChatInsertResult } from './dsh-input.js'
 import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
 import type { SidebarService } from './sidebar-service.js'
@@ -481,6 +482,37 @@ export function registerIpc(deps: IpcDeps): () => void {
   ipcMain.handle('sidebar:get-prefs', () => {
     const prefs = getWindowManager()?.panelPrefs ?? loadPanelPrefs()
     return { sidebarWidth: prefs.sidebarWidth, sidebarVisible: prefs.sidebarVisible }
+  })
+
+  /**
+   * Drop `@<path>` into dsh's chat input.
+   *
+   * Validated against the sidebar's current root in safeSidebarPath, so a
+   * stale row from a directory the sidebar is no longer showing cannot turn
+   * into an arbitrary-path insert. The renderer-side script (see
+   * dsh-input.ts) does the actual DOM work; executeJavaScript's return value
+   * is the IIFE's own result, so a missing textarea comes back as
+   * `{ok:false, error}` rather than an exception.
+   */
+  ipcMain.handle('sidebar:add-to-chat', async (_e, path: unknown) => {
+    const safe = safeSidebarPath(deps.getSidebar?.() ?? null, path)
+    if (!safe) return { ok: false, error: '路径不在侧栏目录内' }
+    const text = buildChatInsert(safe)
+    if (!text) return { ok: false, error: '无法生成引用' }
+    const wm = getWindowManager()
+    const win = wm?.window ?? null
+    if (!win) return { ok: false, error: '主窗口尚未就绪' }
+    if (win.webContents.isDestroyed()) return { ok: false, error: '主窗口已销毁' }
+    try {
+      const result = await win.webContents.executeJavaScript(
+        buildInsertScript(text),
+        true,
+      ) as ChatInsertResult | null
+      if (!result) return { ok: false, error: 'dsh 页面未返回结果' }
+      return result
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
   })
 
   // ── Live feeds ──
