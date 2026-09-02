@@ -164,46 +164,45 @@ function createMainWindow(url: string): BrowserWindow {
     icon: loadPackagedIcon(),
     show: false,
     backgroundColor: '#0f1117',
-    webPreferences: {
-      preload: join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      // See window-manager.ts: the default since Electron 22 is sandbox:true,
-      // and a sandboxed preload is limited to require('electron'). Our main
-      // preload only requires electron, so this is actually unnecessary — but
-      // kept identical to the overlay config so any future require() inside
-      // preload.js does not silently break again.
-      sandbox: false,
-    },
+    // NOTE: no webPreferences on purpose. The dsh page is NOT rendered by this
+    // window's built-in webContents any more — WindowManager creates a
+    // WebContentsView for it (see window-manager.ts) so the overlays can sit
+    // BESIDE the page instead of on top of it. What is left here is an empty
+    // dark backdrop, and `ready-to-show` (which tracks it) no longer means
+    // anything, so the show logic below follows the content view instead.
   })
 
-  // Inject theme CSS after page loads
+  windowManager = new WindowManager(win)
+  const page = windowManager.createContentView({
+    url,
+    preload: join(__dirname, 'preload.js'),
+  })
+
+  // Theme CSS must be re-injected after every navigation: Electron drops
+  // inserted CSS when the page reloads. Bound to the CONTENT view now — the
+  // window's own webContents holds no page.
   const themeCSS = loadCurrentThemeCSS()
   if (themeCSS) {
-    win.webContents.on('did-finish-load', () => {
-      win.webContents.insertCSS(themeCSS)
+    page.webContents.on('did-finish-load', () => {
+      page.webContents.insertCSS(themeCSS)
     })
   }
 
-  win.loadURL(url)
-
-  // Overlay panel + status bar. Attached AFTER loadURL: attach() injects the
-  // avoidance padding right away, and re-injects on every did-finish-load, so
-  // the first navigation is covered either way.
-  windowManager = new WindowManager(win)
+  // Overlay panel + status bar. Attached AFTER the content view: contentView
+  // children paint in insertion order, and the page must stay underneath.
   windowManager.attach()
   // Wire the accessor so the IPC layer (notably the approval-notification path
   // defined next to registerIpc) can reach the WindowManager even though main
   // process imports it after a circular boundary.
   setWindowManagerAccessor(() => windowManager)
 
-  win.once('ready-to-show', () => {
+  page.webContents.once('did-finish-load', () => {
     splashWindow?.close()
     splashWindow = null
     win.show()
   })
 
-  // SAFETY NET: `ready-to-show` does NOT fire if the page errors during load
+  // SAFETY NET: `did-finish-load` does NOT fire if the page errors during load
   // (CSP rejection, network blip, dsh backend not yet up). With show:false the
   // user sees only a taskbar icon forever. After 12s, if the page is still
   // loading, force-show anyway — better to surface a blank page than stay
@@ -214,12 +213,12 @@ function createMainWindow(url: string): BrowserWindow {
     if (!win.isDestroyed()) win.show()
   }
   const fallbackTimer = setTimeout(() => {
-    if (splashWindow && !win.isDestroyed() && win.webContents.isLoading()) {
-      log('launcher', 'ready-to-show 未在 12s 内触发，强制显示主窗口')
+    if (splashWindow && !win.isDestroyed() && page.webContents.isLoading()) {
+      log('launcher', '页面 12s 内未完成加载，强制显示主窗口')
       showFallback()
     }
   }, 12_000)
-  win.once('ready-to-show', () => clearTimeout(fallbackTimer))
+  page.webContents.once('did-finish-load', () => clearTimeout(fallbackTimer))
 
   win.on('close', () => {
     const bounds = win.getBounds()
@@ -293,9 +292,14 @@ async function restartBackend(): Promise<{ ok: boolean; error?: string }> {
     }
 
     // NOT optional — see the note above this function.
-    if (mainWindow) {
+    //
+    // Reloaded on the content view, not on the window: the BrowserWindow's own
+    // webContents is an empty backdrop now and reloading it would leave the
+    // visible page pointing at the dead token.
+    const page = windowManager?.pageContents ?? null
+    if (page) {
       try {
-        await mainWindow.loadURL(result.url)
+        await page.loadURL(result.url)
       } catch (err) {
         const error = `服务已重启，但页面重新加载失败：${(err as Error).message}`
         healthMonitor?.noteSpawnError(error)
@@ -774,7 +778,6 @@ function buildMenuActions(): MenuActions {
       return {
         panel: p.visible,
         statusBar: p.statusVisible,
-        avoidCss: p.avoidCss,
         sidebar: p.sidebarVisible,
       }
     },
@@ -789,11 +792,6 @@ function buildMenuActions(): MenuActions {
     toggleStatusBar: () => {
       const next = !(windowManager?.panelPrefs.statusVisible ?? loadPanelPrefs().statusVisible)
       windowManager?.setStatusVisible(next)
-      rebuildMenu()
-    },
-    toggleAvoidCss: () => {
-      const next = !(windowManager?.panelPrefs.avoidCss ?? loadPanelPrefs().avoidCss)
-      windowManager?.setAvoidCss(next)
       rebuildMenu()
     },
 

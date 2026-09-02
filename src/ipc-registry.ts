@@ -173,12 +173,15 @@ export function registerIpc(deps: IpcDeps): () => void {
     savePreferences({ themeId })
     // Prefer the manager's window: matching on title also caught the splash
     // and the market window, which do not have a dsh page to re-theme.
-    const win = getWindowManager()?.window ?? null
-    if (!win) return
+    // pageContents, NOT window.webContents: the dsh page lives in its own
+    // WebContentsView now, and reloading the window's own (empty) webContents
+    // would leave the visible page untouched.
+    const page = getWindowManager()?.pageContents ?? null
+    if (!page) return
     const css = loadCurrentThemeCSS()
-    win.webContents.reload()
-    win.webContents.once('did-finish-load', () => {
-      if (css) win.webContents.insertCSS(css)
+    page.reload()
+    page.once('did-finish-load', () => {
+      if (css) page.insertCSS(css)
     })
   })
 
@@ -500,11 +503,13 @@ export function registerIpc(deps: IpcDeps): () => void {
     const text = buildChatInsert(safe)
     if (!text) return { ok: false, error: '无法生成引用' }
     const wm = getWindowManager()
-    const win = wm?.window ?? null
-    if (!win) return { ok: false, error: '主窗口尚未就绪' }
-    if (win.webContents.isDestroyed()) return { ok: false, error: '主窗口已销毁' }
+    // The dsh chat box lives in the content view, not in the window's own
+    // (empty) webContents.
+    const page = wm?.pageContents ?? null
+    if (!page) return { ok: false, error: '主窗口尚未就绪' }
+    if (page.isDestroyed()) return { ok: false, error: '主窗口已销毁' }
     try {
-      const result = await win.webContents.executeJavaScript(
+      const result = await page.executeJavaScript(
         buildInsertScript(text),
         true,
       ) as ChatInsertResult | null

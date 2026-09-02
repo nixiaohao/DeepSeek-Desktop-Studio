@@ -229,6 +229,7 @@ const MODULES = [
   'diagnostics-preload.js',
   'diagnostics-window.js',
   'dsh-input.js',
+  'layout-geometry.js',
   'external-editor.js',
   'preferences.js',
   'logging.js',
@@ -409,6 +410,9 @@ const EXPECTED = [
   ['health-monitor.js', 'PHASE_LABEL'],
   ['window-manager.js', 'WindowManager'],
   ['window-manager.js', 'STATUS_BAR_HEIGHT'],
+  ['window-manager.js', 'SIDEBAR_MIN_WIDTH'],
+  ['layout-geometry.js', 'computeLayout'],
+  ['layout-geometry.js', 'CONTENT_MIN_WIDTH'],
   ['ipc-registry.js', 'registerIpc'],
   ['external-editor.js', 'openInEditor'],
   ['external-editor.js', 'EDITOR_PRESETS'],
@@ -784,43 +788,88 @@ async function checkDiagnosticsIpc() {
 }
 
 /**
- * Static guard for the overlay layout policy.
+ * Static guard for the three-column layout policy.
  *
- * The user reported "打开侧栏会严重挤压主窗体的内容" when the sidebar
- * added its 280px on top of the dsh file tree's 200px. The decision (see
- * window-manager.ts refreshAvoidance) is now: the sidebar OVERLAPS the dsh
- * file tree, so the chat column does not move. This is a static check on
- * the compiled lib-new/window-manager.js because the behaviour is a
- * function of the CSS string the function builds, not its public surface,
- * and any regression here is silent from the user's side — the chat
- * column just shrinks again.
+ * Two user reports are pinned down here:
+ *
+ *   1. "打开侧栏会严重挤压主窗体的内容" — while the dsh page lived in the
+ *      BrowserWindow's own (unmovable) webContents, the only way to keep it
+ *      clear of the overlays was to inject CSS padding, which squeezed the
+ *      chat column.
+ *   2. "右侧监控面板打开后与中间的 dsh 主窗口中间有一大段的空白" — injected
+ *      padding shrinks the page's content box but does NOT move the viewport
+ *      the page lays itself out in, so the page kept its own margins and a
+ *      dead strip appeared before the panel.
+ *
+ * Both are cured structurally by giving the page its own WebContentsView and
+ * bounding it to the space between the overlays (see layout-geometry.ts).
+ * These checks are static because the policy lives in how the compiled
+ * window-manager wires the rectangles together, and both regressions are
+ * silent from the code's side — only visible on screen.
  */
 async function checkLayoutPolicy() {
   const wm = fs.readFileSync(path.join(LIB, 'window-manager.js'), 'utf-8')
-  // Strip block + line comments. String literals and template strings stay
-  // intact: the test wants to see the template-literal interpolation that
-  // the function builds, not the runtime value, and stripping them would
-  // destroy the very `${right}` we want to assert on.
+  const mainJs = fs.readFileSync(path.join(LIB, 'main.js'), 'utf-8')
+  // Comments are stripped so a comment that merely MENTIONS the old padding
+  // trick cannot satisfy (or fail) these assertions.
   const code = wm
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
+  const mainCode = mainJs
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
 
-  // The left padding must be a literal 0: a future regression that
-  // re-introduces `const left = this.sidebarWidthNow()` would re-create
-  // the squeeze the user reported (sidebar + injected padding = chat
-  // column squeezed by 280px on top of the dsh file tree's 200px).
+  // 1. Every rectangle comes from the pure geometry module. Two independent
+  //    computations of "how wide is the sidebar" is exactly how the page and
+  //    the overlays used to disagree.
+  // tsc emits imported calls as `(0, mod.fn)(...)`, so tolerate the closing
+  // paren between the identifier and the call.
   assert(
-    /const\s+left\s*=\s*0\s*[;,]/.test(code),
-    'window-manager: refreshAvoidance pins `left` to a literal 0',
-    'window-manager.js no longer pins padding-left to 0 — the sidebar may once again push the chat column rightward'
+    /computeLayout[\s)]{0,2}\(/.test(code),
+    'window-manager: layout() delegates the rectangles to computeLayout()',
+    'window-manager.js no longer calls computeLayout — page and overlay geometry can drift apart again'
   )
-  // And the CSS template must still be hooked up: `padding-right:${right}px`
-  // remains so the right panel still pushes the chat column to keep it
-  // visible. The template literal preserves the `${right}` interpolation.
+  for (const slot of ['content', 'sidebar', 'panel']) {
+    assert(
+      new RegExp(`setBounds\\(rects\\.${slot}\\)`).test(code),
+      `window-manager: ${slot} is bounded by its computed rect`,
+      `window-manager.js no longer applies rects.${slot} — the ${slot} view keeps its stale bounds`
+    )
+  }
+
+  // 2. The padding workaround is gone. If it comes back, so do both reports.
   assert(
-    /padding-right:\$\{right\}px/.test(code),
-    'window-manager: refreshAvoidance still injects padding-right from the panel width',
-    'window-manager.js no longer pads the right side for the panel — the panel would cover the chat column'
+    !/padding-(left|right)/.test(code),
+    'window-manager: no CSS padding is injected into the dsh page',
+    'window-manager.js injects CSS padding again — padding does not move the page viewport, which is what caused the blank strip'
+  )
+  assert(
+    !/insertCSS/.test(code),
+    'window-manager: nothing is injected into the page any more',
+    'window-manager.js calls insertCSS — the page is not ours to style'
+  )
+
+  // 3. Z-order: contentView children paint in insertion order, so the page
+  //    must be added BEFORE the overlays or it covers them.
+  const iContent = code.indexOf('addChildView(view)')
+  const iPanel = code.indexOf('addChildView(this.panelView)')
+  assert(
+    iContent > 0 && iPanel > 0 && iContent < iPanel,
+    'window-manager: the page view is added before the overlays',
+    'the content view is added after the panel — it would paint over the sidebar and panel'
+  )
+
+  // 4. main.js has to load the page through the manager. Loading it into the
+  //    BrowserWindow instead silently re-instates the unmovable webContents.
+  assert(
+    /createContentView\s*\(/.test(mainCode),
+    'main.js creates the page through WindowManager.createContentView()',
+    'main.js no longer calls createContentView — the dsh page would render in the unmovable built-in webContents'
+  )
+  assert(
+    !/mainWindow\.loadURL\(/.test(mainCode),
+    'main.js never loads the dsh page into the BrowserWindow itself',
+    'main.js calls mainWindow.loadURL — the page would leave the content view and be covered by the overlays again'
   )
 }
 
@@ -828,7 +877,7 @@ function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 78
+  const MIN_ASSERTIONS = 120
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,

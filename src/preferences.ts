@@ -20,16 +20,6 @@ export interface PanelPrefs {
   monitorHeight: number
   /** Bottom status bar shown. */
   statusVisible: boolean
-  /**
-   * Inject padding CSS into the dsh page so its content reflows out from
-   * under the overlay instead of being covered by it.
-   *
-   * The overlay views cannot shrink the page's own webContents (Electron keeps
-   * it outside contentView.children), so CSS padding is the only way to avoid
-   * covering content. If it ever causes layout trouble for a particular dsh
-   * build, the user can switch it off from the menu and get plain overlay.
-   */
-  avoidCss: boolean
   /** Left file/git sidebar shown at all. */
   sidebarVisible: boolean
   /** Sidebar width in px. */
@@ -85,12 +75,11 @@ export const DEFAULT_PANEL_PREFS: PanelPrefs = {
   width: 320,
   monitorHeight: 220,
   statusVisible: true,
-  avoidCss: true,
-  // The sidebar REPLACES the dsh file tree (it overlays it on top, see
-  // window-manager.ts refreshAvoidance — no padding-left is injected), so
-  // showing it by default does not steal space from anything the user was
-  // already looking at. 240px covers the dsh tree's 200px + its 40px gap to
-  // the icon strip without overlapping the icon strip itself.
+  // The page, sidebar and panel are three real columns (see
+  // layout-geometry.ts): the page is bounded to whatever space the overlays
+  // leave, so opening the sidebar narrows the page instead of covering it.
+  // 240px is the VS Code-ish default — enough for a path column plus a git
+  // status badge without dominating a 1280-wide window.
   sidebarVisible: true,
   sidebarWidth: 240,
 }

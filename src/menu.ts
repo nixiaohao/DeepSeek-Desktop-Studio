@@ -27,12 +27,10 @@ export interface MenuActions {
   getPanelState: () => {
     panel: boolean
     statusBar: boolean
-    avoidCss: boolean
     sidebar: boolean
   }
   togglePanel: () => void
   toggleStatusBar: () => void
-  toggleAvoidCss: () => void
   toggleSidebar: () => void
 
   // ── backend ──
@@ -122,12 +120,6 @@ export function setupMenu(actions: MenuActions): void {
           type: 'checkbox',
           checked: panel.statusBar,
           click: () => actions.toggleStatusBar(),
-        },
-        {
-          label: '主界面避开面板（推荐）',
-          type: 'checkbox',
-          checked: panel.avoidCss,
-          click: () => actions.toggleAvoidCss(),
         },
         { type: 'separator' },
         {

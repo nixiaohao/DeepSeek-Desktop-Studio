@@ -1,34 +1,60 @@
 /**
- * window-manager.ts — overlay panel + status bar on the main window.
+ * window-manager.ts — three-column layout for the main window.
  *
- * WHY OVERLAY VIEWS INSTEAD OF TOUCHING THE PAGE
- * ----------------------------------------------
- * The main window shows the dsh web UI, which is NOT our asset: it is a
- * localhost page owned by the harness, rebuilt on every upstream update.
- * Injecting DOM or depending on its selectors would break constantly.
+ * THE LAYOUT
+ * ----------
+ *      ┌──────────┬──────────────────────────┬─────────┐
+ *      │ sidebar  │  dsh page (content view) │ panel   │
+ *      └──────────┴──────────────────────────┴─────────┘
+ *      │                status bar                     │
  *
- * So the panel and status bar are separate `WebContentsView`s composited by
- * Electron, loaded from our own assets/ HTML. They know nothing about dsh and
- * dsh knows nothing about them.
+ * All four are `WebContentsView`s owned by this class — INCLUDING the dsh page.
+ * That last part is the whole point, and it is the one non-obvious decision
+ * here, so it is worth spelling out.
  *
- * THE ONE CAVEAT (measured, not assumed)
- * --------------------------------------
- * A BrowserWindow's own webContents is NOT part of contentView.children — it
- * cannot be resized or repositioned (verified with a probe on Electron
- * 33.4.11). Overlays therefore COVER the page rather than shrinking it.
+ * WHY THE dsh PAGE IS ITS OWN VIEW (and not the BrowserWindow's webContents)
+ * --------------------------------------------------------------------------
+ * A BrowserWindow's built-in webContents is NOT part of contentView.children
+ * and cannot be moved or resized (verified with a probe on Electron 33.4.11).
+ * While the page lived there, our overlays could only COVER it, and the
+ * workaround was to inject CSS padding so the content reflowed out from
+ * underneath. That workaround caused both reported symptoms:
  *
- * Mitigation: we inject padding CSS into the page so its content reflows out
- * from under the overlay. If that ever misbehaves for a particular dsh build
- * the user can turn it off (panel.avoidCss) and get plain overlay behaviour.
+ *   - the sidebar hid the dsh file tree (padding would have pushed the tree
+ *     into the chat column instead, which was reported earlier as "挤压"), and
+ *   - the injected right padding left a blank strip before the panel, because
+ *     padding shrinks the content box but does NOT move the viewport the page
+ *     lays itself out in.
  *
- * Also note: child view bounds are absolute and are NOT auto-updated on window
- * resize, so every geometry change must go through layout().
+ * Giving the page its own view makes the window a real three-column layout:
+ * the page is bounded to the space between the overlays, so it reflows itself
+ * — nothing is covered, nothing is padded, and no CSS is injected into a page
+ * we do not own. The rectangles all come from layout-geometry.ts.
+ *
+ * TWO RULES THAT STILL BITE
+ * -------------------------
+ *  1. z-order is insertion order: the content view MUST be added before the
+ *     overlays or it paints on top of them.
+ *  2. Child view bounds are absolute and are NOT auto-updated on window
+ *     resize, so every geometry change must go through layout().
  */
-import { app, BrowserWindow, WebContentsView } from 'electron'
+import { app, BrowserWindow, WebContentsView, type WebContents } from 'electron'
 import { join } from 'node:path'
 import { loadPanelPrefs, savePanelPrefs, type PanelPrefs } from './preferences.js'
 import { log } from './logging.js'
 import type { ViewState } from './diagnostics.js'
+import {
+  computeLayout,
+  CONTENT_MIN_WIDTH,
+  PANEL_MAX_WIDTH,
+  PANEL_MIN_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  STATUS_BAR_HEIGHT,
+} from './layout-geometry.js'
+
+/** Re-exported so existing importers keep working. */
+export { STATUS_BAR_HEIGHT, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH }
 
 /**
  * How many preload/renderer failure strings are kept per view.
@@ -43,22 +69,22 @@ const VIEW_ERROR_LIMIT = 8
 /** The overlays whose preload health is tracked. */
 export type ViewLabel = 'panel' | 'statusbar' | 'sidebar'
 
-/** Height of the bottom status bar, px. */
-export const STATUS_BAR_HEIGHT = 26
-/** Draggable width limits for the right panel, px. */
-export const PANEL_MIN_WIDTH = 240
-export const PANEL_MAX_WIDTH = 720
-/** Draggable width limits for the left file/git sidebar, px. */
-export const SIDEBAR_MIN_WIDTH = 200
-export const SIDEBAR_MAX_WIDTH = 560
+/** Options for the dsh page's view. */
+export interface ContentViewOptions {
+  /** The authenticated localhost URL (carries the per-process token). */
+  url: string
+  /** Absolute path to the main window's preload. */
+  preload: string
+}
 
 export class WindowManager {
   private readonly win: BrowserWindow
+  /** The dsh page. Null until createContentView(). */
+  private contentView: WebContentsView | null = null
   private panelView: WebContentsView | null = null
   private statusView: WebContentsView | null = null
   private sidebarView: WebContentsView | null = null
   private prefs: PanelPrefs
-  private avoidCssKey: string | null = null
   private resizeBound = false
   /**
    * Per-overlay preload health, seeded in attach() and updated from the
@@ -110,9 +136,26 @@ export class WindowManager {
     this.viewState.set(label, { readyAt: current.readyAt, errors })
   }
 
-  /** The main window the overlays are attached to. */
+  /** The main window the views are attached to. */
   get window(): BrowserWindow {
     return this.win
+  }
+
+  /** The view rendering the dsh page (null until createContentView()). */
+  get content(): WebContentsView | null {
+    return this.contentView
+  }
+
+  /**
+   * The dsh page's WebContents, or null before the content view exists.
+   *
+   * Anything that wants to load, reload, re-theme or script the page must go
+   * through this and NOT through `window.webContents`: the BrowserWindow's own
+   * webContents is now an empty backdrop, and talking to it silently does
+   * nothing at all.
+   */
+  get pageContents(): WebContents | null {
+    return this.contentView?.webContents ?? null
   }
 
   /** The panel's WebContentsView (null until attach()). */
@@ -132,6 +175,36 @@ export class WindowManager {
 
   get panelPrefs(): PanelPrefs {
     return { ...this.prefs }
+  }
+
+  /**
+   * Create the view that renders the dsh page and load it.
+   *
+   * MUST be called before attach(): contentView.children paint in insertion
+   * order, so the page has to be the first child or it covers its own panel.
+   *
+   * `loadURL` is async, and `did-finish-load` is delivered from the renderer
+   * over IPC — it therefore cannot fire before the current synchronous block
+   * returns, so callers can safely attach their load listeners to the returned
+   * view afterwards.
+   */
+  createContentView(opts: ContentViewOptions): WebContentsView {
+    if (this.contentView) return this.contentView
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: opts.preload,
+        contextIsolation: true,
+        nodeIntegration: false,
+        // Same reasoning as the overlays below: keep the main preload's
+        // require() working if it ever grows one.
+        sandbox: false,
+      },
+    })
+    this.contentView = view
+    this.win.contentView.addChildView(view)
+    void view.webContents.loadURL(opts.url)
+    this.layout()
+    return view
   }
 
   /**
@@ -226,15 +299,10 @@ export class WindowManager {
       })
     }
 
+    // AFTER the content view — see createContentView().
     this.win.contentView.addChildView(this.panelView)
     this.win.contentView.addChildView(this.statusView)
     this.win.contentView.addChildView(this.sidebarView)
-
-    // Re-inject the avoidance padding after every navigation: Electron drops
-    // inserted CSS when the page reloads.
-    this.win.webContents.on('did-finish-load', () => {
-      void this.refreshAvoidance()
-    })
 
     if (!this.resizeBound) {
       this.win.on('resize', () => this.layout())
@@ -243,37 +311,27 @@ export class WindowManager {
 
     this.applyVisibility()
     this.layout()
-    void this.refreshAvoidance()
   }
 
-  /** Recompute every overlay's bounds. Call after ANY geometry change. */
+  /** Recompute every view's bounds. Call after ANY geometry change. */
   layout(): void {
-    if (!this.panelView && !this.statusView && !this.sidebarView) return
-    const [cw, ch] = this.win.getContentSize()
-    const bar = this.prefs.statusVisible ? STATUS_BAR_HEIGHT : 0
+    if (!this.contentView && !this.panelView && !this.statusView && !this.sidebarView) return
+    const [width, height] = this.win.getContentSize()
 
-    if (this.statusView) {
-      this.statusView.setBounds({ x: 0, y: ch - STATUS_BAR_HEIGHT, width: cw, height: STATUS_BAR_HEIGHT })
-    }
-    if (this.panelView) {
-      this.panelView.setBounds({
-        x: Math.max(0, cw - this.prefs.width),
-        y: 0,
-        width: this.prefs.width,
-        height: Math.max(0, ch - bar),
-      })
-    }
-    if (this.sidebarView) {
-      // sidebarWidthNow(), not prefs.sidebarWidth: the drawn width is clamped,
-      // and the padding injected by refreshAvoidance() has to match what was
-      // actually drawn or the page ends up with a gap.
-      this.sidebarView.setBounds({
-        x: 0,
-        y: 0,
-        width: this.sidebarWidthNow(),
-        height: Math.max(0, ch - bar),
-      })
-    }
+    const rects = computeLayout({
+      width,
+      height,
+      sidebarVisible: this.prefs.sidebarVisible,
+      sidebarWidth: this.prefs.sidebarWidth,
+      panelVisible: this.prefs.visible,
+      panelWidth: this.prefs.width,
+      statusVisible: this.prefs.statusVisible,
+    })
+
+    this.contentView?.setBounds(rects.content)
+    this.panelView?.setBounds(rects.panel)
+    this.statusView?.setBounds(rects.statusBar)
+    this.sidebarView?.setBounds(rects.sidebar)
   }
 
   setPanelVisible(visible: boolean): void {
@@ -281,7 +339,6 @@ export class WindowManager {
     savePanelPrefs({ visible })
     this.applyVisibility()
     this.layout()
-    void this.refreshAvoidance()
   }
 
   togglePanel(): void {
@@ -293,7 +350,6 @@ export class WindowManager {
     savePanelPrefs({ sidebarVisible: visible })
     this.applyVisibility()
     this.layout()
-    void this.refreshAvoidance()
   }
 
   toggleSidebar(): void {
@@ -307,7 +363,6 @@ export class WindowManager {
     this.prefs = { ...this.prefs, sidebarWidth: clamped }
     savePanelPrefs({ sidebarWidth: clamped })
     this.layout()
-    void this.refreshAvoidance()
   }
 
   setStatusVisible(visible: boolean): void {
@@ -315,98 +370,19 @@ export class WindowManager {
     savePanelPrefs({ statusVisible: visible })
     this.applyVisibility()
     this.layout()
-    void this.refreshAvoidance()
-  }
-
-  /**
-   * Turn the content-avoidance padding on/off.
-   *
-   * This is the escape hatch for the one caveat in the file header: if
-   * injecting padding ever breaks a particular dsh build's layout, the user
-   * can switch to plain overlay behaviour from the menu.
-   */
-  setAvoidCss(enabled: boolean): void {
-    if (this.prefs.avoidCss === enabled) return
-    this.prefs = { ...this.prefs, avoidCss: enabled }
-    savePanelPrefs({ avoidCss: enabled })
-    void this.refreshAvoidance()
   }
 
   /** Resize the panel (dragged from its left edge inside panel.html). */
   setPanelWidth(width: number): void {
     const clamped = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width)))
     if (clamped === this.prefs.width) return
-    const [cw] = this.win.getContentSize()
-    // Never let the panel eat the whole window.
-    const safe = Math.min(clamped, Math.max(PANEL_MIN_WIDTH, cw - 320))
-    this.prefs = { ...this.prefs, width: safe }
-    savePanelPrefs({ width: safe })
+    this.prefs = { ...this.prefs, width: clamped }
+    savePanelPrefs({ width: clamped })
+    // No manual "don't eat the whole window" clamp here: computeLayout()
+    // already refuses to draw a panel that would leave the page less than
+    // CONTENT_MIN_WIDTH. Clamping in both places would just make the drawn
+    // width and the stored width disagree.
     this.layout()
-    void this.refreshAvoidance()
-  }
-
-  /**
-   * Inject CSS padding so the dsh page reflows out from under the overlays.
-   * No-op when disabled or when nothing is shown.
-   *
-   * The right padding is the panel width: the panel sits on top of the dsh
-   * webview and would otherwise cover the chat column. The LEFT padding is
-   * always zero: the sidebar overlaps the dsh file tree rather than pushing
-   * the chat column rightward. Pushing the chat column when the sidebar is
-   * shown was reported as "严重挤压主窗体内容" — the user opens the sidebar
-   * for the file/git tooling, not to shrink what they were already reading.
-   * The dsh file tree is the part the sidebar replaces; everything to its
-   * right (icon strip + chat) keeps its original position.
-   */
-  async refreshAvoidance(): Promise<void> {
-    if (!this.prefs.avoidCss) {
-      await this.clearAvoidance()
-      return
-    }
-    const left = 0
-    const right = this.prefs.visible ? this.prefs.width : 0
-    const bottom = this.prefs.statusVisible ? STATUS_BAR_HEIGHT : 0
-
-    await this.clearAvoidance()
-    if (left === 0 && right === 0 && bottom === 0) return
-
-    const css =
-      `html{padding-left:${left}px!important;padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}` +
-      `body{padding-left:${left}px!important;padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}`
-    try {
-      this.avoidCssKey = await this.win.webContents.insertCSS(css)
-    } catch (err) {
-      log('launcher', `panel: CSS avoidance injection failed: ${(err as Error).message}`)
-    }
-  }
-
-  /** Remove any previously injected avoidance CSS. */
-  private async clearAvoidance(): Promise<void> {
-    if (this.avoidCssKey === null) return
-    const key = this.avoidCssKey
-    this.avoidCssKey = null
-    try {
-      await this.win.webContents.removeInsertedCSS(key)
-    } catch {
-      // Expected after a navigation: the key no longer exists. Not an error.
-    }
-  }
-
-  /**
-   * The width the sidebar is ACTUALLY drawn at, which is not always the
-   * configured one: on a narrow window the sidebar plus the panel would
-   * otherwise squeeze the page away to nothing, so the width is clamped at
-   * draw time and a minimum of 320px is always left for the page.
-   *
-   * Single source of truth on purpose. `layout()` uses it to set the bounds and
-   * `refreshAvoidance()` uses it to size the padding — when those two
-   * disagreed, the page was padded for a sidebar that was never drawn and a
-   * dead gap appeared along the left edge.
-   */
-  private sidebarWidthNow(): number {
-    const [cw] = this.win.getContentSize()
-    const right = this.prefs.visible ? this.prefs.width : 0
-    return Math.min(this.prefs.sidebarWidth, Math.max(SIDEBAR_MIN_WIDTH, cw - right - 320))
   }
 
   private applyVisibility(): void {
@@ -417,14 +393,14 @@ export class WindowManager {
 
   /** Tear down views. Call when the window closes. */
   destroy(): void {
-    try {
-      if (this.panelView) this.win.contentView.removeChildView(this.panelView)
-      if (this.statusView) this.win.contentView.removeChildView(this.statusView)
-      if (this.sidebarView) this.win.contentView.removeChildView(this.sidebarView)
-    } catch { /* window already gone */ }
-    this.panelView?.webContents.close()
-    this.statusView?.webContents.close()
-    this.sidebarView?.webContents.close()
+    for (const view of [this.contentView, this.panelView, this.statusView, this.sidebarView]) {
+      if (!view) continue
+      try {
+        this.win.contentView.removeChildView(view)
+      } catch { /* window already gone */ }
+      view.webContents.close()
+    }
+    this.contentView = null
     this.panelView = null
     this.statusView = null
     this.sidebarView = null
