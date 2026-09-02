@@ -1,0 +1,34 @@
+name: CI
+
+# Every push to main (and every PR) runs the full unit/contract/smoke suite
+# on two platforms. The suite is self-contained plain node — no Electron
+# runtime, no dsh backend, no network beyond npm install — so CI is the
+# cheapest continuous proof that the 1250+ assertions still hold, on the
+# same OS matrix the artifacts are built for.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run test suite
+        run: npm test
