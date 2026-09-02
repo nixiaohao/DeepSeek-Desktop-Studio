@@ -75,7 +75,7 @@ function noop(name) {
 }
 
 /** Channel names main.js / ipc-registry.js register, captured for assertions. */
-const ipcChannels = { handle: new Set(), on: new Set() }
+const ipcChannels = { handle: new Set(), on: new Set(), handlers: new Map() }
 /** The last template handed to Menu.buildFromTemplate. */
 const menuTemplates = []
 /** Flat list of every menu label + accelerator in the last template. */
@@ -184,8 +184,12 @@ const electronStub = {
     on: (ch) => {
       ipcChannels.on.add(ch)
     },
-    handle: (ch) => {
+    // The handler FUNCTION is kept, not just the name: asserting that a channel
+    // is registered says nothing about what it does, and the batch-approval
+    // guard below is a safety rule that has to be exercised, not listed.
+    handle: (ch, fn) => {
       ipcChannels.handle.add(ch)
+      ipcChannels.handlers.set(ch, fn)
     },
     removeHandler: noop('removeHandler'),
   },
@@ -215,6 +219,7 @@ const MODULES = [
   'path-links.js',
   'health-monitor.js',
   'highlight.js',
+  'approval-groups.js',
   'external-editor.js',
   'preferences.js',
   'logging.js',
@@ -276,6 +281,13 @@ function requiresOf(rel) {
   const deps = requiresOf('highlight.js')
   assert(deps.length === 0, 'highlight.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
+{
+  // dsh-stream requires this one at runtime (it needs the same de-dup rules),
+  // so it is on the pure list for a different reason: it must not pull in
+  // electron or anything else, or the stream stops being testable in node.
+  const deps = requiresOf('approval-groups.js')
+  assert(deps.length === 0, 'approval-groups.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
 
 // ── 3. Exported symbols other code depends on ──
 
@@ -305,6 +317,9 @@ const EXPECTED = [
   ['highlight.js', 'languageForPath'],
   ['highlight.js', 'escapeHtml'],
   ['highlight.js', 'HIGHLIGHT_MAX_CHARS'],
+  ['approval-groups.js', 'groupApprovals'],
+  ['approval-groups.js', 'commonTool'],
+  ['approval-groups.js', 'normalizeIds'],
   ['menu.js', 'setupMenu'],
 ]
 
@@ -462,16 +477,98 @@ try {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 } catch { /* best effort */ }
 
-// Belt and braces: even with the uncaughtException guard above, assert that the
-// whole file actually ran. An early abort used to be indistinguishable from a
-// clean pass because nothing checked how much of the suite executed.
-const MIN_ASSERTIONS = 55
-assert(
-  pass + fail >= MIN_ASSERTIONS,
-  `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,
-  `only ${pass + fail} assertions ran — the file aborted early`
-)
+/**
+ * panel:respond-many must refuse an allow that spans two tools.
+ *
+ * The rule lives in the main process on purpose: a page bug must not be able to
+ * turn one click into consent across every tool at once. That only holds if the
+ * guard is exercised HERE — the page cannot be the thing checking it.
+ *
+ * Async, so it runs last: this file is CommonJS with no top-level await, and the
+ * summary below has to wait for these assertions or they would not be counted.
+ */
+async function checkBatchGuard() {
+  console.log('modules: batch approval allow-guard')
 
-console.log(`\nmodules: ${pass} passed, ${fail} failed`)
-if (fail > 0) process.exit(1)
+  const canned = [
+    { approvalId: 'a1', toolName: 'edit', ts: 1 },
+    { approvalId: 'a2', toolName: 'edit', ts: 2 },
+    { approvalId: 'b1', toolName: 'bash', ts: 3 },
+  ]
+  const sent = []
+  const guardStream = {
+    setOnChange: () => {},
+    panelSnapshot: () => ({ changes: [], approvals: canned, sessions: [], dropped: 0, connected: true }),
+    respond: async () => ({ ok: true }),
+    approvals: () => canned,
+    respondMany: async (ids, outcome) => {
+      sent.push({ ids, outcome })
+      return { ok: true, answered: ids.length, failed: [], skipped: [], total: ids.length }
+    },
+  }
+
+  const guardTeardown = registerIpc({
+    getWindowManager: () => null,
+    getHealthMonitor: () => null,
+    getStream: () => guardStream,
+    getAppVersion: () => '0.0.0-smoke',
+    restartBackend: async () => ({ ok: true }),
+    getStatusInfo: () => ({ version: 'x', port: null, channel: 'next' }),
+    quitApp: () => {},
+  })
+
+  try {
+    const respondMany = ipcChannels.handlers.get('panel:respond-many')
+    assert(typeof respondMany === 'function', 'panel:respond-many has a handler we can drive', 'no handler captured')
+    if (typeof respondMany !== 'function') return
+    const call = (ids, outcome) => respondMany(null, ids, outcome)
+
+    const crossTool = await call(['a1', 'b1'], 'allowed-once')
+    assert(crossTool.ok === false, 'an allow spanning two tools is refused', 'it went through')
+    assert(sent.length === 0, 'and nothing reaches the stream', `${sent.length} call(s) escaped the guard`)
+
+    const sameTool = await call(['a1', 'a2'], 'allowed-once')
+    assert(sameTool.ok === true, 'an allow within one tool goes through', JSON.stringify(sameTool))
+    assert(sent.length === 1, 'and reaches the stream exactly once')
+    assert(sent[0].outcome === 'allowed-once', 'with the requested outcome')
+
+    // Refusing work cannot cause damage, so it is deliberately not scoped.
+    const crossToolReject = await call(['a1', 'b1'], 'rejected')
+    assert(crossToolReject.ok === true, 'a reject across tools is allowed', JSON.stringify(crossToolReject))
+
+    const stale = await call(['a1', 'gone'], 'allowed-once')
+    assert(stale.ok === false, 'an allow containing a resolved approval is refused', 'the guard must not half-apply')
+
+    const badOutcome = await call(['a1'], 'allow-all')
+    assert(badOutcome.ok === false, 'an unknown outcome is refused', JSON.stringify(badOutcome))
+
+    const junk = await call([null, 42, '  '], 'rejected')
+    assert(junk.ok === false, 'an empty batch is refused', JSON.stringify(junk))
+
+    const notArray = await call('a1', 'rejected')
+    assert(notArray.ok === false, 'a non-array id list is refused', JSON.stringify(notArray))
+  } finally {
+    guardTeardown()
+  }
+}
+
+function finalize() {
+  // Belt and braces: even with the uncaughtException guard above, assert that the
+  // whole file actually ran. An early abort used to be indistinguishable from a
+  // clean pass because nothing checked how much of the suite executed.
+  const MIN_ASSERTIONS = 60
+  assert(
+    pass + fail >= MIN_ASSERTIONS,
+    `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,
+    `only ${pass + fail} assertions ran — the file aborted early`
+  )
+
+  console.log(`\nmodules: ${pass} passed, ${fail} failed`)
+  if (fail > 0) process.exit(1)
+}
+
+checkBatchGuard().catch((err) => {
+  fail += 1
+  console.error(`  FAIL batch guard threw: ${err && err.message}`)
+}).then(finalize)
 

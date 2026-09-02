@@ -44,6 +44,10 @@ import { PHASE_LABEL, type HealthPhase } from './health-monitor.js'
 // without shipping a grammar to the renderer or paying an IPC round-trip per
 // card. Runs in the isolated world with node access (see `sandbox: false`).
 import { highlightCode, languageForPath } from './highlight.js'
+// Zero runtime imports too. Exposed so the page groups approvals with the SAME
+// rules the main process enforces — one implementation, and a page bug cannot
+// offer an "allow" button spanning two tools.
+import { groupApprovals } from './approval-groups.js'
 
 /** Remove a listener previously added by one of the `on*` helpers. */
 function off(channel: string, cb: (...args: unknown[]) => void): void {
@@ -116,6 +120,41 @@ contextBridge.exposeInMainWorld('dshPanel', {
     outcome: 'allowed-once' | 'rejected'
   ): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('panel:respond', approvalId, outcome),
+
+  /**
+   * Allow or reject several approvals at once.
+   *
+   * `outcome: 'allowed-once'` is only accepted when every id belongs to ONE
+   * tool — the main process re-checks this and refuses otherwise, so the page
+   * does not have to be trusted with the rule. Rejection is unrestricted.
+   *
+   * The result reports per-id: `failed` names the ids that did not go through,
+   * and `skipped` lists ids the agent had already resolved, which is not an
+   * error and must not be shown as one.
+   */
+  /**
+   * Group pending approvals by tool, oldest first (see approval-groups.ts).
+   *
+   * Resolved locally for the same reason findPaths is: it is pure logic, and
+   * the ordering has to match what the main process will accept, so there is
+   * exactly one implementation of it.
+   */
+  groupApprovals: (
+    approvals: { approvalId: string; toolName?: string; ts?: number }[]
+  ): { toolName: string; approvalIds: string[]; ts: number }[] =>
+    groupApprovals(approvals),
+
+  respondMany: (
+    approvalIds: string[],
+    outcome: 'allowed-once' | 'rejected'
+  ): Promise<{
+    ok: boolean
+    answered: number
+    failed: { approvalId: string; error: string }[]
+    skipped: string[]
+    total: number
+    error?: string
+  }> => ipcRenderer.invoke('panel:respond-many', approvalIds, outcome),
 
   // ── actions ──
 

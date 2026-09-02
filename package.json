@@ -5,7 +5,7 @@
   "description": "DeepSeek Studio — Electron desktop shell for deepseek-harness",
   "main": "lib-new/main.js",
   "scripts": {
-    "test": "tsc && node test/channels.unit.cjs && node test/channels.e2e.cjs && node test/critical-exports.cjs && node test/needs-build.cjs && node test/repair-install.cjs && node test/orphan-workspace-dirs.cjs && node test/client-artifacts.cjs && node test/redact.unit.cjs && node test/health.unit.cjs && node test/paths.unit.cjs && node test/editor.unit.cjs && node test/event-store.unit.cjs && node test/dsh-stream.unit.cjs && node test/fs-tree.unit.cjs && node test/file-tree.unit.cjs && node test/git-service.unit.cjs && node test/sidebar-service.unit.cjs && node test/highlight.unit.cjs && node test/panel-api.contract.cjs && node test/modules.smoke.cjs",
+    "test": "tsc && node test/channels.unit.cjs && node test/channels.e2e.cjs && node test/critical-exports.cjs && node test/needs-build.cjs && node test/repair-install.cjs && node test/orphan-workspace-dirs.cjs && node test/client-artifacts.cjs && node test/redact.unit.cjs && node test/health.unit.cjs && node test/paths.unit.cjs && node test/editor.unit.cjs && node test/event-store.unit.cjs && node test/dsh-stream.unit.cjs && node test/approval-groups.unit.cjs && node test/fs-tree.unit.cjs && node test/file-tree.unit.cjs && node test/git-service.unit.cjs && node test/sidebar-service.unit.cjs && node test/highlight.unit.cjs && node test/panel-api.contract.cjs && node test/modules.smoke.cjs",
     "test:unit": "node test/channels.unit.cjs",
     "test:e2e": "node test/channels.e2e.cjs",
     "test:exports": "node test/critical-exports.cjs",
@@ -17,6 +17,7 @@
     "test:editor": "node test/editor.unit.cjs",
     "test:event-store": "node test/event-store.unit.cjs",
     "test:dsh-stream": "node test/dsh-stream.unit.cjs",
+    "test:approval-groups": "node test/approval-groups.unit.cjs",
     "test:fs-tree": "node test/fs-tree.unit.cjs",
     "test:file-tree": "node test/file-tree.unit.cjs",
     "test:git-service": "node test/git-service.unit.cjs",

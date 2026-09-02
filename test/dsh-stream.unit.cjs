@@ -166,6 +166,14 @@ function frame(payload, rpcId = 'r') {
   return `data: ${JSON.stringify({ type: 'server-request', rpcId, method: payload.type, payload })}\n\n`
 }
 
+/** One pending approval on the wire. The rpcId is what the answer must echo. */
+function approvalFrame(approvalId, toolName, rpcId) {
+  return frame(
+    { type: 'approval/requested', sessionId: 'sess-1', approvalId, toolName, callId: 'c-' + approvalId },
+    rpcId,
+  )
+}
+
 function writeCall(callId, filePath) {
   return frame({
     type: 'session/event',
@@ -253,6 +261,134 @@ async function main() {
       assert.match(result.error, /not-pending/, 'the host reason is the only clue available')
     })
     stream.stop()
+  })
+
+  // ── batch respond ──
+
+  await checkAsync('a batch answers every id once, in order, and never concurrently', async () => {
+    const stream = new DshStream()
+    const wire = ['ap-1', 'ap-2', 'ap-3'].map((id, i) => approvalFrame(id, 'edit', 'rpc-' + i)).join('')
+    const order = []
+    let inFlight = 0
+    let maxInFlight = 0
+
+    // stop() lives in finally, not at the end: an assertion that throws would
+    // otherwise leave the stream reconnecting, and the next test's fetch stub
+    // would then be counting ITS retries (which is exactly how a single failing
+    // test here once cascaded into two unrelated reds).
+    try {
+      await withFetch(async (url, init) => {
+        if (String(url).includes('/api/events.mux')) return sseResponse([wire])
+        if (!String(url).includes('/api/respond')) return { ok: 404, json: async () => ({}) }
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        await wait(5)
+        order.push(JSON.parse(init.body).result.value.approvalId)
+        inFlight -= 1
+        return { ok: true, json: async () => ({ result: { ok: true, value: { accepted: true } } }) }
+      }, async () => {
+        stream.start('http://127.0.0.1:3080')
+        await wait(60)
+        const r = await stream.respondMany(['ap-1', 'ap-2', 'ap-3'], 'rejected')
+        assert.strictEqual(r.ok, true, JSON.stringify(r))
+        assert.strictEqual(r.answered, 3)
+        assert.strictEqual(r.total, 3)
+        assert.deepStrictEqual(r.failed, [])
+        assert.deepStrictEqual(r.skipped, [])
+      })
+
+      assert.deepStrictEqual(order, ['ap-1', 'ap-2', 'ap-3'], 'sequential, in the order given')
+      // Promise.all would make this 3. Approval POSTs go to a backend that is a
+      // tool call deep; a fan-out turns a batch into a timeout, after which the
+      // UI cannot tell which approvals actually landed.
+      assert.strictEqual(maxInFlight, 1, 'a batch must not fan out concurrently')
+    } finally {
+      stream.stop()
+    }
+  })
+
+  await checkAsync('an id the agent already resolved is skipped, not failed', async () => {
+    const stream = new DshStream()
+    const wire = approvalFrame('ap-1', 'edit', 'rpc-1')
+    try {
+      await withFetch(async (url) => {
+        if (String(url).includes('/api/events.mux')) return sseResponse([wire])
+        return { ok: true, json: async () => ({ result: { ok: true, value: { accepted: true } } }) }
+      }, async () => {
+        stream.start('http://127.0.0.1:3080')
+        await wait(60)
+        const r = await stream.respondMany(['ap-1', 'ap-gone'], 'rejected')
+        assert.strictEqual(r.answered, 1)
+        assert.deepStrictEqual(r.skipped, ['ap-gone'])
+        assert.deepStrictEqual(r.failed, [], 'a self-resolved approval is nobody’s failure')
+        assert.strictEqual(r.ok, true, 'and it must not fail the batch')
+      })
+    } finally {
+      stream.stop()
+    }
+  })
+
+  await checkAsync('a partial failure names exactly which ids did not go through', async () => {
+    const stream = new DshStream()
+    const wire = approvalFrame('ap-1', 'edit', 'rpc-1') + approvalFrame('ap-2', 'edit', 'rpc-2')
+    try {
+      await withFetch(async (url, init) => {
+        if (String(url).includes('/api/events.mux')) return sseResponse([wire])
+        const id = JSON.parse(init.body).result.value.approvalId
+        const value = id === 'ap-2' ? { accepted: false, reason: 'not-pending' } : { accepted: true }
+        return { ok: true, json: async () => ({ result: { ok: true, value } }) }
+      }, async () => {
+        stream.start('http://127.0.0.1:3080')
+        await wait(60)
+        const r = await stream.respondMany(['ap-1', 'ap-2'], 'rejected')
+        assert.strictEqual(r.ok, false)
+        assert.strictEqual(r.answered, 1, 'the good one still went through')
+        assert.strictEqual(r.failed.length, 1)
+        // "2 of 3 approved" without names leaves the user unable to tell whether
+        // it was the shell command that landed.
+        assert.strictEqual(r.failed[0].approvalId, 'ap-2', 'the user is told WHICH one')
+        assert.match(r.failed[0].error, /not-pending/)
+      })
+    } finally {
+      stream.stop()
+    }
+  })
+
+  await checkAsync('a duplicated id is answered once', async () => {
+    const stream = new DshStream()
+    const wire = approvalFrame('ap-1', 'edit', 'rpc-1')
+    let posts = 0
+    try {
+      await withFetch(async (url) => {
+        if (String(url).includes('/api/events.mux')) return sseResponse([wire])
+        // Only approval answers count: session.list is polled too, and counting
+        // it makes this assertion about the wrong request.
+        if (String(url).includes('/api/respond')) posts += 1
+        return { ok: true, json: async () => ({ result: { ok: true, value: { accepted: true } } }) }
+      }, async () => {
+        stream.start('http://127.0.0.1:3080')
+        await wait(60)
+        const r = await stream.respondMany(['ap-1', 'ap-1', ' ap-1 '], 'rejected')
+        assert.strictEqual(r.total, 1, 'normalised before the fan-out')
+        assert.strictEqual(r.answered, 1)
+      })
+      // A second POST would come back `not-pending` and be reported as a failure
+      // the user never caused.
+      assert.strictEqual(posts, 1, 'de-duplicated before hitting the wire')
+    } finally {
+      stream.stop()
+    }
+  })
+
+  await checkAsync('garbage ids are dropped rather than posted', async () => {
+    const stream = new DshStream()
+    const r = await stream.respondMany([null, 42, '', '  ', {}], 'rejected')
+    assert.strictEqual(r.total, 0, 'nothing usable was supplied')
+    assert.strictEqual(r.answered, 0)
+    assert.deepStrictEqual(r.failed, [])
+    // ok means "nothing FAILED", which is true — the empty case is rejected one
+    // level up, in the IPC handler, where it can carry a message.
+    assert.strictEqual(r.ok, true)
   })
 
   await checkAsync('session.list is polled and merged', async () => {

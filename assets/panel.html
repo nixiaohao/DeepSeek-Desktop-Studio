@@ -91,6 +91,31 @@
   .approval .acts button.deny { border-color: var(--err); color: var(--err); }
   .approval .acts button.deny:hover { background: var(--err); color: #2a1414; }
 
+  /* ── batch approval ──
+     One row per TOOL with an allow button, plus a single reject-everything row.
+     There is deliberately no "allow everything" row: batching an approval means
+     "I trust this tool here", and that reasoning does not transfer across
+     tools. The main process refuses a cross-tool allow regardless of what this
+     page offers, so the omission is a UI promise, not the only guard. */
+  .batch {
+    margin: 4px 6px; padding: 5px 7px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--bg-2);
+  }
+  .batch .btitle { color: var(--fg-dim); font-size: 10px; margin-bottom: 5px; }
+  .batch .grow { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+  .batch .grow:last-child { margin-bottom: 0; }
+  .batch .gname {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--warn);
+  }
+  .batch button { flex: none; padding: 2px 8px; font-size: 10px; }
+  .batch button.allow { border-color: var(--ok); color: var(--ok); }
+  .batch button.allow:hover { background: var(--ok); color: #10221a; }
+  .batch button.deny { border-color: var(--err); color: var(--err); }
+  .batch button.deny:hover { background: var(--err); color: #2a1414; }
+  .batch .all { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border); }
+  .batch .all .gname { color: var(--fg-dim); }
+
   .chg { border-bottom: 1px solid var(--border); }
   .chg:last-child { border-bottom: none; }
   .chg .row {
@@ -557,6 +582,104 @@
     return wrap;
   }
 
+  /** How many ids a failure toast lists before it starts eliding. */
+  var FAIL_IDS_SHOWN = 3;
+
+  /**
+   * Answer a batch and report what actually happened.
+   *
+   * The report is per-bucket rather than a single success flag: "3 of 5" says
+   * nothing about WHICH two failed, and with a shell command in the batch the
+   * user needs to know whether that one landed.
+   *
+   * `skipped` is reported separately from `failed` and without an error tone —
+   * those approvals were resolved by the agent itself between render and click.
+   */
+  function batchAnswer(ids, outcome, buttons) {
+    if (!ids.length) return;
+    for (var b = 0; b < buttons.length; b++) buttons[b].disabled = true;
+
+    /**
+     * Always re-enabled, and always followed by a re-render.
+     *
+     * Leaving them disabled "until the list refreshes" sounds tidier and is a
+     * trap: if the backend never pushes an update the bar stays greyed out
+     * forever with no way to retry. The cost of re-enabling is a possible
+     * double-click on a stale row, and that degrades harmlessly — the approval
+     * is gone from the store, so it comes back in `skipped`, not `failed`.
+     */
+    function release() {
+      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = false;
+      scheduleChanges();
+    }
+
+    api.respondMany(ids, outcome).then(function (r) {
+      if (!r || r.error) {
+        toast('批量操作失败：' + ((r && r.error) || '未知错误'), true);
+        release();
+        return;
+      }
+      var parts = [];
+      if (r.answered) parts.push('已处理 ' + r.answered + ' 个');
+      if (r.failed.length) {
+        var names = r.failed.map(function (f) { return f.approvalId; });
+        var shown = names.slice(0, FAIL_IDS_SHOWN).join(', ');
+        if (names.length > FAIL_IDS_SHOWN) shown += ' 等 ' + names.length + ' 个';
+        parts.push('失败 ' + names.length + ' 个：' + shown + '（' + r.failed[0].error + '）');
+      }
+      // No error tone on this one: the agent resolved those itself.
+      if (r.skipped.length) parts.push(r.skipped.length + ' 个已被 agent 自行处理');
+      toast(parts.join('，') || '没有可处理的审批', r.failed.length > 0);
+      release();
+    }).catch(function (e) {
+      toast('批量操作失败：' + String((e && e.message) || e), true);
+      release();
+    });
+  }
+
+  /**
+   * The batch bar, shown only when there is more than one pending approval.
+   *
+   * With exactly one, the card's own 允许/拒绝 buttons already are the batch —
+   * a "batch of one" row above it is just noise.
+   */
+  function batchNode(approvals) {
+    var groups = api.groupApprovals(approvals);
+    var wrap = el('div', 'batch');
+    wrap.appendChild(el('div', 'btitle',
+      '批量审批 · 共 ' + approvals.length + ' 个待处理（允许按工具分组，拒绝不受限制）'));
+
+    for (var i = 0; i < groups.length; i++) {
+      (function (group) {
+        var row = el('div', 'grow');
+        var n = group.approvalIds.length;
+        row.appendChild(el('span', 'gname', group.toolName + ' × ' + n));
+
+        var allow = el('button', 'allow', n > 1 ? ('允许这 ' + n + ' 个') : '允许');
+        var deny = el('button', 'deny', n > 1 ? ('拒绝这 ' + n + ' 个') : '拒绝');
+        allow.onclick = function () { batchAnswer(group.approvalIds, 'allowed-once', [allow, deny]); };
+        deny.onclick = function () { batchAnswer(group.approvalIds, 'rejected', [allow, deny]); };
+        row.appendChild(allow);
+        row.appendChild(deny);
+        wrap.appendChild(row);
+      })(groups[i]);
+    }
+
+    // Reject-everything is safe to offer globally: refusing work cannot cause
+    // damage. The mirror-image button (allow everything) is deliberately absent.
+    if (approvals.length > 1) {
+      var all = el('div', 'grow all');
+      all.appendChild(el('span', 'gname', '全部 ' + approvals.length + ' 个'));
+      var denyAll = el('button', 'deny', '全部拒绝');
+      var ids = approvals.map(function (a) { return a.approvalId; });
+      denyAll.onclick = function () { batchAnswer(ids, 'rejected', [denyAll]); };
+      all.appendChild(denyAll);
+      wrap.appendChild(all);
+    }
+
+    return wrap;
+  }
+
   function renderChanges(snap) {
     if (!snap) return;
     var changes = snap.changes || [];
@@ -575,6 +698,7 @@
       return;
     }
 
+    if (approvals.length > 1) changesBody.appendChild(batchNode(approvals));
     for (var i = 0; i < approvals.length; i++) {
       changesBody.appendChild(approvalNode(approvals[i], changes));
     }

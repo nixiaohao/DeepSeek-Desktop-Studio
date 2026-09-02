@@ -25,6 +25,7 @@ import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import { savePreferences, loadPanelPrefs, savePanelPrefs, loadExternalEditor } from './preferences.js'
 import { openInEditor } from './external-editor.js'
 import { isWithinRoot } from './fs-tree.js'
+import { commonTool, normalizeIds } from './approval-groups.js'
 import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
 import type { SidebarService } from './sidebar-service.js'
@@ -221,6 +222,43 @@ export function registerIpc(deps: IpcDeps): () => void {
     if (!stream) return { ok: false, error: '变更流尚未连接' }
     try {
       return await stream.respond(approvalId, outcome as ApprovalOutcome)
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  /**
+   * Batch answer.
+   *
+   * The allow restriction is enforced HERE rather than only in the page,
+   * because it is a safety rule, not a layout preference: a page bug (or a
+   * stale cached page) must not be able to turn one click into blanket consent
+   * across every tool at once. `commonTool()` returns null both when the ids
+   * span several tools and when any id is no longer pending.
+   *
+   * Rejection is unrestricted — refusing work cannot cause damage.
+   */
+  ipcMain.handle('panel:respond-many', async (_e, approvalIds: unknown, outcome: unknown) => {
+    if (outcome !== 'allowed-once' && outcome !== 'rejected') {
+      return { ok: false, error: `未知的审批结果：${String(outcome)}` }
+    }
+    const ids = normalizeIds(approvalIds)
+    if (ids.length === 0) {
+      return { ok: false, error: '没有选中任何审批' }
+    }
+
+    const stream = deps.getStream?.() ?? null
+    if (!stream) return { ok: false, error: '变更流尚未连接' }
+
+    if (outcome === 'allowed-once') {
+      const tool = commonTool(stream.approvals(), ids)
+      if (tool === null) {
+        return { ok: false, error: '批量允许只能对同一工具执行（或有审批已失效）' }
+      }
+    }
+
+    try {
+      return await stream.respondMany(ids, outcome as ApprovalOutcome)
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }

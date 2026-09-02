@@ -25,6 +25,9 @@ import {
   type StoreSnapshot,
 } from './event-store.js'
 import { redactTokenInUrl } from './redact.js'
+import { normalizeIds } from './approval-groups.js'
+// approval-groups.ts carries no runtime imports, so this stays testable in
+// plain node — see test/modules.smoke.cjs, which pins that fact.
 
 /** The only two answers a client may give; the rest are host-side outcomes. */
 export type ApprovalOutcome = 'allowed-once' | 'rejected'
@@ -121,6 +124,17 @@ export interface DshStreamOptions {
 export interface RespondResult {
   ok: boolean
   error?: string
+}
+
+/** Outcome of one batch. `skipped` is not a failure — see respondMany(). */
+export interface RespondManyResult {
+  /** True when nothing FAILED. Skipped entries do not make this false. */
+  ok: boolean
+  answered: number
+  failed: { approvalId: string; error: string }[]
+  /** Ids that were no longer pending — the agent resolved them on its own. */
+  skipped: string[]
+  total: number
 }
 
 /**
@@ -381,6 +395,50 @@ export class DshStream {
       return { ok: false, error: `后端未接受回复（${receipt.reason ?? '未知原因'}）` }
     }
     return { ok: true }
+  }
+
+  /**
+   * Answer several approvals in one go.
+   *
+   * SEQUENTIAL, not `Promise.all`. The backend is a single agent turn deep when
+   * a tool call is pending, and firing twenty approvals at it at once is how a
+   * batch becomes a timeout — after which the UI cannot tell which of them
+   * landed, which is precisely the ambiguity this function exists to avoid.
+   *
+   * Reporting is per-id and never collapses: a batch that half-succeeded must
+   * say WHICH half, because "3 of 7 approved" without names leaves the user
+   * unable to tell whether the shell command went through.
+   *
+   * `skipped` is deliberately separate from `failed`. An approval that left the
+   * store between render and click was resolved by the agent itself — nothing
+   * went wrong and the user is not to blame for it. Folding it into `failed`
+   * would make every stale click look like an error.
+   *
+   * Ids are de-duplicated: a duplicate would POST the same approval twice, and
+   * the second POST would come back `not-pending` and be reported as a failure
+   * the user never caused.
+   */
+  async respondMany(
+    approvalIds: readonly string[],
+    outcome: ApprovalOutcome,
+  ): Promise<RespondManyResult> {
+    const ids = normalizeIds(approvalIds)
+    const failed: { approvalId: string; error: string }[] = []
+    const skipped: string[] = []
+    let answered = 0
+
+    for (const id of ids) {
+      const approval = this.store.getApproval(id)
+      if (!approval) {
+        skipped.push(id)
+        continue
+      }
+      const result = await this.respond(id, outcome)
+      if (result.ok) answered += 1
+      else failed.push({ approvalId: id, error: result.error ?? '未知错误' })
+    }
+
+    return { ok: failed.length === 0, answered, failed, skipped, total: ids.length }
   }
 
   snapshot(): StoreSnapshot {

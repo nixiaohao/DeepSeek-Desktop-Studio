@@ -23,8 +23,18 @@
  * no match, changes nothing, and the suite stays green — which reads as "the
  * test does not catch this bug" when really the mutation never happened.
  *
- * Always mutate the COMPILED output in lib-new/, never src/, and always restore
- * by rebuilding from src (npx tsc) rather than by hand.
+ * ⚠️ MUTATE THE ARTIFACT THE TEST ACTUALLY READS. Most tests require lib-new/,
+ * but a STATIC test reads src/*.ts — `test/panel-api.contract.cjs` brace-matches
+ * the TypeScript source, so mutating lib-new/ there produces a green run that
+ * reads as "the test catches nothing" when really nothing was tested.
+ * Rule of thumb: runtime tests → lib-new/; static/source-reading tests → src/.
+ *
+ * ⚠️ GREP THE ANCHOR BEFORE TRUSTING A SWEEP. tsc puts a statement body on the
+ * following line, so `if (x)` and `return y` are never adjacent. A whole sweep
+ * reporting "pattern not found" is almost always the anchors, not the tests.
+ *
+ * Always restore by copying a backup (or `npx tsc` to rebuild lib-new/), never
+ * by hand — see the warning above.
  */
 const fs = require('node:fs')
 const [file, find, repl] = process.argv.slice(2)
