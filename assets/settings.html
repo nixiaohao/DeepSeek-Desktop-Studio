@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!--
+  Same CSP as the other shell pages: `default-src 'none'` blocks every remote
+  load, and `script-src` needs 'unsafe-inline' because the logic is an inline
+  <script>. See panel.html for why an external script is not the alternative
+  for a file:// page.
+
+  This page must stay renderable with NO bridge at all. It is the window a user
+  opens to fix a broken configuration, so "the settings window is broken" is
+  the failure with the fewest remaining options — it says so explicitly and
+  points at the prefs file, which can always be edited by hand.
+-->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline';" />
+<title>设置</title>
+<style>
+  :root {
+    --bg: #14161d;
+    --bg-2: #1a1d26;
+    --bg-3: #22262f;
+    --border: #272b36;
+    --fg: #d6dae3;
+    --fg-dim: #8b93a7;
+    --accent: #4c8dff;
+    --err: #ff6b6b;
+    --ok: #3ddc84;
+    --warn: #ffb454;
+
+    /* Type scale — see panel.html. The main process injects the same
+       --fs-scale override here, so the token names must match exactly. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --fs-xs: calc(11px * var(--fs-scale));
+    --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-ui); font-size: var(--fs-base); line-height: 1.6;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  header {
+    flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+  }
+  header .title { font-weight: 600; }
+  header .spacer { flex: 1; }
+  header .dirty { font-size: var(--fs-md); color: var(--warn); }
+  header .dirty.clean { color: var(--fg-dim); }
+
+  footer {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px; background: var(--bg-2); border-top: 1px solid var(--border);
+  }
+  footer .spacer { flex: 1; }
+  footer .status { font-size: var(--fs-md); color: var(--fg-dim); }
+
+  /* Form controls do NOT inherit font-family/size from body in Chromium, so
+     every one of them restates the tokens. Omitting it leaves a 13px sans
+     label next to an 11px default input — the exact mismatch the type scale
+     exists to prevent. */
+  button, input, select {
+    font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.5;
+    color: var(--fg); background: var(--bg-3);
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 4px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  button.primary:hover:not(:disabled) { background: rgba(76,141,255,.12); }
+  input[type=text] { font-family: var(--font-mono); width: 100%; }
+  input[type=checkbox] { width: auto; padding: 0; }
+  select { max-width: 320px; }
+
+  #body { flex: 1; overflow-y: auto; padding: 4px 14px 20px; }
+  #body::-webkit-scrollbar { width: 9px; }
+  #body::-webkit-scrollbar-thumb { background: #2f3441; border-radius: 5px; }
+
+  section { padding: 12px 0 4px; border-bottom: 1px solid var(--border); }
+  section:last-child { border-bottom: none; }
+  section > h2 {
+    font-size: var(--fs-base); font-weight: 600;
+    margin-bottom: 8px; color: var(--fg);
+  }
+  section > .note {
+    font-size: var(--fs-sm); color: var(--fg-dim);
+    margin: -4px 0 10px;
+  }
+
+  .field {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 5px 0; min-height: 30px;
+  }
+  .field > label {
+    flex: none; width: 132px; padding-top: 3px; color: var(--fg);
+  }
+  .field > .ctl { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .field .hint { font-size: var(--fs-sm); color: var(--fg-dim); }
+  .field .hint.warn { color: var(--warn); }
+  .field .hint.err { color: var(--err); }
+  .field.checkbox { align-items: center; }
+  .field.checkbox > label { padding-top: 0; }
+
+  .radio-row { display: flex; flex-wrap: wrap; gap: 6px 16px; padding-top: 4px; }
+  .radio-row label {
+    display: flex; align-items: center; gap: 5px; cursor: pointer;
+  }
+  .radio-row .risky { color: var(--warn); font-size: var(--fs-sm); }
+
+  .editor-row { display: flex; gap: 8px; align-items: center; }
+  .editor-row input { flex: 1; }
+
+  #restart-bar {
+    display: none; align-items: center; gap: 10px;
+    margin: 10px 0 0; padding: 8px 12px;
+    border: 1px solid var(--warn); border-radius: 4px;
+    background: rgba(255,180,84,.07); color: var(--fg);
+    font-size: var(--fs-md);
+  }
+  #restart-bar.show { display: flex; }
+  #restart-bar .spacer { flex: 1; }
+
+  #fatal {
+    margin: 12px 14px; padding: 10px 12px; border: 1px solid var(--err);
+    border-radius: 4px; color: var(--err); display: none; white-space: pre-wrap;
+  }
+
+  #toast {
+    position: absolute; left: 50%; bottom: 62px; transform: translateX(-50%);
+    background: var(--bg-2); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 4px; padding: 5px 14px; font-size: var(--fs-md); opacity: 0;
+    transition: opacity .18s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+
+  .path {
+    font-family: var(--font-mono); font-size: var(--fs-sm);
+    color: var(--fg-dim); word-break: break-all; user-select: text;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">设置</span>
+    <span class="spacer"></span>
+    <span class="dirty clean" id="dirty"></span>
+  </header>
+
+  <div id="fatal"></div>
+  <div id="body">
+    <div style="color:var(--fg-dim)">正在读取设置…</div>
+  </div>
+  <div id="toast"></div>
+
+  <footer>
+    <button class="primary" id="btn-save" disabled>保存</button>
+    <button id="btn-reload" disabled>放弃修改</button>
+    <span class="spacer"></span>
+    <span class="status" id="status"></span>
+  </footer>
+
+<script>
+(function () {
+  'use strict';
+
+  var api = window.dshSettings;
+  var body = document.getElementById('body');
+  var fatalBox = document.getElementById('fatal');
+  var dirtyEl = document.getElementById('dirty');
+  var statusEl = document.getElementById('status');
+  var saveBtn = document.getElementById('btn-save');
+  var reloadBtn = document.getElementById('btn-reload');
+
+  var model = null;    // { state, options, info }
+  var form = null;     // working copy of state
+
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'show';
+    setTimeout(function () { t.className = ''; }, 1900);
+  }
+
+  /**
+   * The one failure the user has no next step for.
+   *
+   * If the bridge is missing then this page's preload did not run, which means
+   * the settings window cannot read or write anything — but the prefs file is
+   * still a plain JSON file on disk that can be edited by hand, so naming its
+   * path is the difference between dead end and workaround.
+   */
+  function fatal(msg) {
+    fatalBox.style.display = 'block';
+    fatalBox.textContent = msg;
+    body.innerHTML = '';
+    saveBtn.disabled = true;
+    reloadBtn.disabled = true;
+  }
+
+  function isDirty() {
+    return !!form && JSON.stringify(form) !== JSON.stringify(model.state);
+  }
+
+  function refreshDirty() {
+    var d = isDirty();
+    saveBtn.disabled = !d;
+    reloadBtn.disabled = !d;
+    dirtyEl.textContent = d ? '有未保存的修改' : '已是最新';
+    dirtyEl.className = d ? 'dirty' : 'dirty clean';
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  function section(title, note) {
+    var s = el('section');
+    s.appendChild(el('h2', null, title));
+    if (note) s.appendChild(el('div', 'note', note));
+    return s;
+  }
+
+  function field(labelText, controlNodes, hintNode) {
+    var f = el('div', 'field');
+    f.appendChild(el('label', null, labelText));
+    var ctl = el('div', 'ctl');
+    for (var i = 0; i < controlNodes.length; i++) ctl.appendChild(controlNodes[i]);
+    if (hintNode) ctl.appendChild(hintNode);
+    f.appendChild(ctl);
+    return f;
+  }
+
+  /** A dropdown whose options all come from the main process. */
+  function select(options, value, onchange, placeholder) {
+    var sel = document.createElement('select');
+    // Placeholder first, and matching the empty value: the preset picker is a
+    // command ("fill the fields with this") rather than a stored setting, so
+    // it must not sit on a preset that was never chosen.
+    if (placeholder !== undefined) {
+      var ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = placeholder;
+      ph.selected = String(value) === '';
+      sel.appendChild(ph);
+    }
+    for (var i = 0; i < options.length; i++) {
+      var o = document.createElement('option');
+      // Values may be numbers (font scale); option.value is always a string,
+      // so the comparison below has to stringify the current value too.
+      o.value = String(options[i].value);
+      o.textContent = options[i].label;
+      if (String(options[i].value) === String(value)) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.onchange = function () { onchange(sel.value); };
+    return sel;
+  }
+
+  // ── Sections ──
+
+  function buildAppearance() {
+    var s = section('外观', '主题与面板字号会立即生效，不需要重启。');
+
+    s.appendChild(field('界面主题', [
+      select(model.options.themes, form.themeId, function (v) {
+        form.themeId = v;
+        refreshDirty();
+      }),
+    ]));
+
+    s.appendChild(field('面板字号', [
+      select(model.options.scales, form.uiScale, function (v) {
+        // Number(), not parseFloat: the scale is a discrete step and a
+        // non-numeric value must not silently become NaN and blank the pages.
+        form.uiScale = Number(v);
+        refreshDirty();
+      }),
+    ], el('div', 'hint', '只缩放本程序面板的文字，不影响 dsh 页面本身的布局。')));
+
+    return s;
+  }
+
+  function buildInterface() {
+    var s = section('界面', '');
+
+    var items = [
+      ['文件侧栏', 'sidebarVisible'],
+      ['监控面板', 'panelVisible'],
+      ['状态栏', 'statusVisible'],
+    ];
+    for (var i = 0; i < items.length; i++) {
+      (function (labelText, key) {
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!form[key];
+        cb.onchange = function () { form[key] = cb.checked; refreshDirty(); };
+
+        var wrap = el('div', 'radio-row');
+        var lab = document.createElement('label');
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(labelText));
+        wrap.appendChild(lab);
+
+        var f = el('div', 'field checkbox');
+        f.appendChild(el('label', null, ''));
+        var ctl = el('div', 'ctl');
+        ctl.appendChild(wrap);
+        f.appendChild(ctl);
+        s.appendChild(f);
+      })(items[i][0], items[i][1]);
+    }
+
+    return s;
+  }
+
+  function buildEditor() {
+    var s = section('外部编辑器',
+      '点击输出里的文件路径时用哪个编辑器打开。本程序不内置编辑器——编辑始终在你自己的编辑器里进行。');
+
+    // Preset dropdown: picking one fills the two text fields rather than
+    // writing straight to the model, so the user can see and tweak what the
+    // preset actually is before saving.
+    var presetSel = select(model.options.editorPresets, '', function (v) {
+      var p = null;
+      for (var i = 0; i < model.options.editorPresets.length; i++) {
+        if (String(model.options.editorPresets[i].value) === v) p = model.options.editorPresets[i];
+      }
+      if (!p) return;
+      cmdInput.value = p.command || '';
+      argsInput.value = p.args || '';
+      onEditorChange();
+    }, '（选择预设…）');
+
+    var cmdInput = document.createElement('input');
+    cmdInput.type = 'text';
+    cmdInput.placeholder = '留空 = 使用系统默认程序';
+    cmdInput.value = form.editor.command;
+    cmdInput.oninput = onEditorChange;
+
+    var argsInput = document.createElement('input');
+    argsInput.type = 'text';
+    argsInput.placeholder = '{file}';
+    argsInput.value = form.editor.args;
+    argsInput.oninput = onEditorChange;
+
+    var hintEl = el('div', 'hint', '');
+    var browseBtn = el('button', null, '浏览…');
+    browseBtn.onclick = function () {
+      api.browseEditor().then(function (p) {
+        if (!p) return;
+        cmdInput.value = p;
+        // A hand-picked executable has no known jump-to-line syntax, so the
+        // template is reset to the plain form instead of keeping whatever the
+        // previous preset left there.
+        argsInput.value = '{file}';
+        onEditorChange();
+      }).catch(function () { toast('打开选择对话框失败'); });
+    };
+
+    var testBtn = el('button', null, '测试打开');
+    testBtn.onclick = function () {
+      // Sends what is in the FORM, not what is saved: testing the saved config
+      // would make "test" meaningless until the user saves first.
+      var cfg = { command: cmdInput.value.trim(), args: argsInput.value };
+      testBtn.disabled = true;
+      api.testEditor(cfg).then(function (r) {
+        testBtn.disabled = false;
+        if (r && r.ok) toast(r.usedSystemDefault ? '已用系统默认程序打开测试文件' : '已尝试打开测试文件');
+        else toast('打开失败：' + ((r && r.error) || '未知错误'));
+      }).catch(function (e) {
+        testBtn.disabled = false;
+        toast('打开失败：' + String((e && e.message) || e));
+      });
+    };
+
+    var cmdRow = el('div', 'editor-row');
+    cmdRow.appendChild(cmdInput);
+    cmdRow.appendChild(browseBtn);
+
+    var argsRow = el('div', 'editor-row');
+    argsRow.appendChild(argsInput);
+    argsRow.appendChild(testBtn);
+
+    s.appendChild(field('预设', [presetSel]));
+    s.appendChild(field('可执行文件', [cmdRow],
+      el('div', 'hint', '可以填 PATH 里的命令名（如 code），也可以填完整路径。')));
+    s.appendChild(field('参数模板', [argsRow], hintEl));
+
+    function onEditorChange() {
+      form.editor = { command: cmdInput.value.trim(), args: argsInput.value };
+      // Validation is a live hint, not a gate: both things it flags are
+      // handled by buildEditorArgs(), so the file still opens. The template
+      // check lives in the renderer purely so the user sees it while typing.
+      var tpl = checkTemplateLocal(form.editor.args, form.editor.command);
+      hintEl.className = 'hint' + (tpl.level === 'warn' ? ' warn' : '');
+      hintEl.textContent = tpl.message;
+      refreshDirty();
+    }
+
+    onEditorChange();
+    return s;
+  }
+
+  /**
+   * Mirror of the main process's checkEditorTemplate(), kept here so the hint
+   * updates on keystroke instead of after a save.
+   *
+   * Duplicating logic is normally a smell; here it is the cheaper of two
+   * options — the alternative is an IPC round-trip per keystroke, and the
+   * authoritative version (settings-model.ts) is unit-tested, so a divergence
+   * shows up as a test failure rather than a silent behavioural difference.
+   */
+  function checkTemplateLocal(args, command) {
+    if (!command || !command.trim()) {
+      return { level: 'ok', message: '未配置编辑器，将使用系统默认程序打开。' };
+    }
+    var tpl = (args || '').trim();
+    if (!tpl) return { level: 'ok', message: '留空等价于 {file}。' };
+
+    var unknown = {};
+    var re = /\{([^{}]*)\}/g;
+    var m;
+    while ((m = re.exec(tpl)) !== null) {
+      var name = m[1].trim();
+      if (name !== 'file' && name !== 'line' && name !== 'col') unknown[name] = 1;
+    }
+    var names = Object.keys(unknown);
+    if (names.length) {
+      var list = names.map(function (p) { return '{' + p + '}'; }).join('、');
+      return { level: 'warn', message: '无法识别的占位符 ' + list + ' 会原样传给编辑器（可用：{file}、{line}、{col}）。' };
+    }
+    if (tpl.indexOf('{file}') < 0) {
+      return { level: 'warn', message: '模板里没有 {file}，文件路径会被自动追加到参数末尾。' };
+    }
+    return { level: 'ok', message: '模板可用。' };
+  }
+
+  function buildChannel() {
+    var s = section('更新通道',
+      '决定跟随上游 deepseek-harness 的哪个发布通道。更改这一项需要重启应用才能生效。');
+
+    var row = el('div', 'radio-row');
+    for (var i = 0; i < model.options.channels.length; i++) {
+      (function (c) {
+        var radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'channel';
+        radio.checked = form.channel === c.value;
+        radio.onchange = function () { form.channel = c.value; refreshDirty(); };
+
+        var lab = document.createElement('label');
+        lab.appendChild(radio);
+        lab.appendChild(document.createTextNode(c.label));
+        if (c.risky) lab.appendChild(el('span', 'risky', ' 可能不兼容插件'));
+        row.appendChild(lab);
+      })(model.options.channels[i]);
+    }
+
+    var f = el('div', 'field');
+    f.appendChild(el('label', null, ''));
+    var ctl = el('div', 'ctl');
+    ctl.appendChild(row);
+    f.appendChild(ctl);
+    s.appendChild(f);
+    return s;
+  }
+
+  function buildPrefs() {
+    var s = section('配置文件',
+      '所有设置都存在这个 JSON 文件里。如果本窗口打不开，可以直接手工编辑它。');
+    s.appendChild(el('div', 'path', model.info.prefsPath));
+    var btn = el('button', null, '在文件管理器中显示');
+    btn.onclick = function () {
+      api.revealPrefs().then(function (r) {
+        if (r && !r.ok) toast('打开失败：' + (r.error || '未知错误'));
+      }).catch(function () { toast('打开失败'); });
+    };
+    var f = el('div', 'field');
+    f.appendChild(el('label', null, ''));
+    var ctl = el('div', 'ctl');
+    ctl.appendChild(btn);
+    f.appendChild(ctl);
+    s.appendChild(f);
+    return s;
+  }
+
+  function buildRestartBar() {
+    var bar = el('div');
+    bar.id = 'restart-bar';
+    bar.appendChild(el('span', null, '更新通道已更改，重启应用后生效。'));
+    bar.appendChild(el('span', 'spacer'));
+    var btn = el('button', 'primary', '立即重启');
+    btn.onclick = function () {
+      btn.disabled = true;
+      api.relaunch().catch(function () { btn.disabled = false; });
+    };
+    bar.appendChild(btn);
+    return bar;
+  }
+
+  function render() {
+    body.innerHTML = '';
+    body.appendChild(buildAppearance());
+    body.appendChild(buildInterface());
+    body.appendChild(buildEditor());
+    body.appendChild(buildChannel());
+    body.appendChild(buildPrefs());
+    body.appendChild(buildRestartBar());
+    refreshDirty();
+  }
+
+  function load() {
+    if (!api) {
+      fatal('window.dshSettings 未定义：settings-preload.js 没有执行。\n\n可以手工编辑配置文件（见主菜单「设置 → 打开配置文件」）。');
+      return;
+    }
+    api.read().then(function (m) {
+      if (!m || m.error) {
+        fatal('读取设置失败：' + ((m && m.error) || '未知错误'));
+        return;
+      }
+      model = m;
+      // A deep copy, not a reference: the working copy is edited in place and
+      // compared against the original to decide what is dirty.
+      form = JSON.parse(JSON.stringify(m.state));
+      render();
+      statusEl.textContent = 'DeepSeek Studio ' + (m.info && m.info.version ? m.info.version : '');
+    }).catch(function (e) {
+      fatal('读取设置失败：' + String((e && e.message) || e));
+    });
+  }
+
+  saveBtn.onclick = function () {
+    if (!api || !form) return;
+    saveBtn.disabled = true;
+    api.save(form).then(function (r) {
+      if (!r || !r.ok) {
+        saveBtn.disabled = false;
+        toast('保存失败：' + ((r && r.error) || '未知错误'));
+        return;
+      }
+      // Adopt the saved state as the new baseline, so "已是最新" reflects
+      // what is actually on disk rather than what was typed.
+      model.state = JSON.parse(JSON.stringify(form));
+      refreshDirty();
+      statusEl.textContent = '已保存';
+      toast('设置已保存');
+      var bar = document.getElementById('restart-bar');
+      if (bar) bar.className = r.restartRequired ? 'show' : '';
+    }).catch(function (e) {
+      saveBtn.disabled = false;
+      toast('保存失败：' + String((e && e.message) || e));
+    });
+  };
+
+  reloadBtn.onclick = function () {
+    if (!model) return;
+    form = JSON.parse(JSON.stringify(model.state));
+    render();
+    statusEl.textContent = '';
+  };
+
+  load();
+})();
+</script>
+</body>
+</html>

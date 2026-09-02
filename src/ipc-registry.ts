@@ -19,12 +19,33 @@
  * user, in a packaged app with no devtools.
  */
 import { ipcMain, shell, clipboard, dialog, BrowserWindow, Notification } from 'electron'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { subscribeBackend, getBackendLines, getLogDir, log } from './logging.js'
 import type { BackendLine } from './logging.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
-import { savePreferences, loadPanelPrefs, savePanelPrefs, loadExternalEditor } from './preferences.js'
-import { openInEditor } from './external-editor.js'
+import {
+  savePreferences,
+  loadPreferences,
+  loadPanelPrefs,
+  savePanelPrefs,
+  loadExternalEditor,
+  saveExternalEditor,
+  prefsPath,
+  normalizeUiScale,
+  UI_SCALES,
+} from './preferences.js'
+import { openInEditor, describeEditorConfig, EDITOR_PRESETS } from './external-editor.js'
+import { CHANNELS, isChannelId, normalizeChannel } from './channels.js'
+import {
+  changedFields,
+  needsRestart,
+  normalizeTextField,
+  type SettingsState,
+} from './settings-model.js'
+import { notifySettingsSaved } from './settings-window.js'
+import { relaunchApp } from './relaunch.js'
 import { isWithinRoot } from './fs-tree.js'
 import { redactTokenInText } from './redact.js'
 import { commonTool, normalizeIds } from './approval-groups.js'
@@ -169,13 +190,20 @@ export function registerIpc(deps: IpcDeps): () => void {
 
   // ── Legacy channels (moved verbatim from main.ts) ──
 
-  ipcMain.on('switch-theme', (_event, themeId: string) => {
+  /**
+   * Persist a theme and restyle the dsh page.
+   *
+   * pageContents, NOT window.webContents: the dsh page lives in its own
+   * WebContentsView, and reloading the window's own (empty) webContents would
+   * leave the visible page untouched. (An earlier version matched windows by
+   * title and re-themed the splash screen too.)
+   *
+   * Shared by `switch-theme` and the settings window so the two paths cannot
+   * drift — a theme that applies from the menu but not from 设置 would be a
+   * bug nobody thinks to look for.
+   */
+  const applyTheme = (themeId: string): void => {
     savePreferences({ themeId })
-    // Prefer the manager's window: matching on title also caught the splash
-    // and the market window, which do not have a dsh page to re-theme.
-    // pageContents, NOT window.webContents: the dsh page lives in its own
-    // WebContentsView now, and reloading the window's own (empty) webContents
-    // would leave the visible page untouched.
     const page = getWindowManager()?.pageContents ?? null
     if (!page) return
     const css = loadCurrentThemeCSS()
@@ -183,6 +211,10 @@ export function registerIpc(deps: IpcDeps): () => void {
     page.once('did-finish-load', () => {
       if (css) page.insertCSS(css)
     })
+  }
+
+  ipcMain.on('switch-theme', (_event, themeId: string) => {
+    applyTheme(themeId)
   })
 
   ipcMain.handle('get-themes', () => listThemes())
@@ -515,6 +547,223 @@ export function registerIpc(deps: IpcDeps): () => void {
       ) as ChatInsertResult | null
       if (!result) return { ok: false, error: 'dsh 页面未返回结果' }
       return result
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  // ── Settings: standalone settings window ──
+
+  /**
+   * Where the editor "test open" writes its probe file.
+   *
+   * A FIXED path in the OS temp directory, and deliberately not a real
+   * project file: the settings window has no business opening something the
+   * user did not point at, and it must never open the prefs file itself — one
+   * stray edit there is a corrupted configuration, reported later as a
+   * completely unrelated failure. Reusing one path also keeps the temp
+   * directory clean no matter how many times the button is pressed.
+   */
+  const EDITOR_TEST_FILE = join(tmpdir(), 'deepseek-studio-editor-test.txt')
+
+  /**
+   * Flatten the currently persisted settings into a SettingsState.
+   *
+   * They live in three different places (top-level prefs, the panel blob, and
+   * the editor record) which is exactly why a settings window was worth
+   * building: there was no single place to look at or edit them.
+   */
+  const readSettingsState = (): SettingsState => {
+    const prefs = loadPreferences()
+    const p = loadPanelPrefs()
+    const editor = loadExternalEditor()
+    return {
+      themeId: prefs.themeId,
+      uiScale: p.uiScale,
+      sidebarVisible: p.sidebarVisible,
+      panelVisible: p.visible,
+      statusVisible: p.statusVisible,
+      editor: { command: editor?.command ?? '', args: editor?.args ?? '' },
+      channel: normalizeChannel(prefs.channel),
+    }
+  }
+
+  ipcMain.handle('settings:read', () => ({
+    state: readSettingsState(),
+    options: {
+      // Built here, not in the page: the sandboxed preload cannot require
+      // theme.js / channels.js / external-editor.js, and shipping the lists
+      // over IPC is what lets it stay sandboxed.
+      themes: listThemes().map((t) => ({ value: t.id, label: t.name })),
+      channels: CHANNELS.map((c) => ({ value: c.id, label: c.label, risky: c.risky })),
+      scales: UI_SCALES.map((s) => ({ value: s, label: `${Math.round(s * 100)}%` })),
+      editorPresets: EDITOR_PRESETS.map((p) => ({
+        value: p.id,
+        label: p.label,
+        command: p.config.command,
+        args: p.config.args ?? '',
+      })),
+    },
+    info: {
+      prefsPath: prefsPath(),
+      version: deps.getAppVersion(),
+    },
+  }))
+
+  /**
+   * Save a whole settings state.
+   *
+   * Everything the page sends is untrusted — it is the same shape as our
+   * state, but it arrives from a renderer, and the values land in
+   * `setBounds()`, in CSS and in `spawn()`. Each field is therefore coerced
+   * back to something legal rather than written through.
+   *
+   * Only the changed fields are applied. Re-applying everything would reload
+   * the dsh page for a theme that did not change and re-inject CSS on every
+   * save, and the reload is visible to the user as a flicker.
+   */
+  ipcMain.handle('settings:save', (_e, raw: unknown) => {
+    const before = readSettingsState()
+    const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+    const ed = (src.editor && typeof src.editor === 'object' ? src.editor : {}) as Record<string, unknown>
+
+    const after: SettingsState = {
+      themeId: typeof src.themeId === 'string' && src.themeId ? src.themeId : before.themeId,
+      // normalizeUiScale, not Number(): the value is interpolated into CSS,
+      // where a 0 or NaN renders every panel blank — indistinguishable from a
+      // crash, and it would happen on the very screen used to fix it.
+      uiScale: normalizeUiScale(src.uiScale),
+      sidebarVisible: typeof src.sidebarVisible === 'boolean' ? src.sidebarVisible : before.sidebarVisible,
+      panelVisible: typeof src.panelVisible === 'boolean' ? src.panelVisible : before.panelVisible,
+      statusVisible: typeof src.statusVisible === 'boolean' ? src.statusVisible : before.statusVisible,
+      editor: {
+        command: normalizeTextField(ed.command),
+        args: normalizeTextField(ed.args, 256),
+      },
+      channel: isChannelId(src.channel) ? src.channel : before.channel,
+    }
+
+    const changes = changedFields(before, after)
+    const restartRequired = needsRestart(changes)
+    const wm = getWindowManager()
+
+    if (changes.includes('themeId')) applyTheme(after.themeId)
+
+    if (changes.includes('uiScale')) {
+      // Normalised again at the boundary rather than trusting `after.uiScale`:
+      // it is typed `number` because the page sends arbitrary JSON, and this
+      // is the last point before the value is interpolated into CSS.
+      const scale = normalizeUiScale(after.uiScale)
+      wm?.setUiScale(scale)
+      savePanelPrefs({ uiScale: scale })
+    }
+
+    if (changes.includes('sidebarVisible')) {
+      wm?.setSidebarVisible(after.sidebarVisible)
+      savePanelPrefs({ sidebarVisible: after.sidebarVisible })
+    }
+    if (changes.includes('panelVisible')) {
+      wm?.setPanelVisible(after.panelVisible)
+      savePanelPrefs({ visible: after.panelVisible })
+    }
+    if (changes.includes('statusVisible')) {
+      wm?.setStatusVisible(after.statusVisible)
+      savePanelPrefs({ statusVisible: after.statusVisible })
+    }
+
+    if (changes.includes('editor')) saveExternalEditor(after.editor)
+
+    // Persisted now, applied on next boot: the channel is read once while
+    // resolving the upstream runtime, and switching it live would leave a
+    // running dsh on the old channel while the prefs claim the new one.
+    if (changes.includes('channel')) savePreferences({ channel: after.channel })
+
+    // Lets main.ts rebuild the menu, whose 视图 items mirror several of these.
+    if (changes.length > 0) notifySettingsSaved(restartRequired)
+
+    return { ok: true, restartRequired }
+  })
+
+  ipcMain.handle('settings:browse-editor', async () => {
+    const win = getWindowManager()?.window ?? null
+    const res = await dialog.showOpenDialog(win ?? undefined!, {
+      title: '选择编辑器可执行文件',
+      properties: ['openFile'],
+      // Windows executables are not reliably marked executable, so the
+      // extension filter is the only useful hint there.
+      filters:
+        process.platform === 'win32'
+          ? [{ name: '可执行文件', extensions: ['exe', 'cmd', 'bat'] }]
+          : [],
+    })
+    if (res.canceled || !res.filePaths.length) return ''
+    return res.filePaths[0]
+  })
+
+  /**
+   * Open a probe file with the configuration currently in the form.
+   *
+   * Takes the config as an argument rather than reading it from disk so that
+   * "test" tests what the user is looking at — testing the saved value would
+   * make the button meaningless until they save first, which is the one thing
+   * a test button must not require.
+   */
+  ipcMain.handle('settings:test-editor', async (_e, raw: unknown) => {
+    const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+    const config = {
+      command: normalizeTextField(src.command),
+      args: normalizeTextField(src.args, 256),
+    }
+    try {
+      writeFileSync(
+        EDITOR_TEST_FILE,
+        'DeepSeek Studio 编辑器测试文件\n\n' +
+          '如果你能看到这一行，说明外部编辑器配置正常。\n' +
+          '本文件可以安全删除。\n',
+        'utf-8',
+      )
+    } catch (err) {
+      return { ok: false, error: `无法创建测试文件：${(err as Error).message}` }
+    }
+    // Line 3 is the "it works" line, so a working --goto template lands the
+    // cursor on visible proof rather than on the title.
+    try {
+      return await openInEditor(config, EDITOR_TEST_FILE, 3, 1)
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('settings:reveal-prefs', async () => {
+    // showItemInFolder needs the file to exist; if it does not, the prefs are
+    // simply at their defaults and opening the folder is still the right
+    // answer (that is where the file will be created).
+    const err = existsSync(prefsPath())
+      ? await shell.showItemInFolder(prefsPath())
+      : await shell.openPath(join(prefsPath(), '..'))
+    return err ? { ok: false, error: err } : { ok: true }
+  })
+
+  ipcMain.handle('settings:describe-editor', (_e, raw: unknown) => {
+    const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+    return describeEditorConfig({
+      command: normalizeTextField(src.command),
+      args: normalizeTextField(src.args, 256),
+    })
+  })
+
+  /**
+   * Restart the app.
+   *
+   * Reached only from the "needs a restart" bar, so it is always preceded by a
+   * save. relaunchApp() quits this process, so the IPC reply may never be
+   * delivered — the page disables its button before calling rather than
+   * relying on the response.
+   */
+  ipcMain.handle('settings:relaunch', () => {
+    try {
+      relaunchApp()
+      return { ok: true }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }

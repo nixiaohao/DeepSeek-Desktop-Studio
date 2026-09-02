@@ -228,6 +228,9 @@ const MODULES = [
   'diagnostics-host.js',
   'diagnostics-preload.js',
   'diagnostics-window.js',
+  'settings-model.js',
+  'settings-preload.js',
+  'settings-window.js',
   'dsh-input.js',
   'layout-geometry.js',
   'ui-scale.js',
@@ -396,6 +399,32 @@ function requiresOf(rel) {
   const deps = requiresOf('dsh-input.js')
   assert(deps.length === 0, 'dsh-input.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
+{
+  // The settings window is where a user goes when something is misconfigured,
+  // so its logic must be among the last things that can break. A runtime
+  // import here is a module that has to load successfully before the window
+  // can validate or normalise anything — i.e. before the user can fix it.
+  const deps = requiresOf('settings-model.js')
+  assert(deps.length === 0, 'settings-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
+{
+  // The two sandboxed bridges must require NOTHING but 'electron'.
+  //
+  // A local require inside a sandboxed preload throws before
+  // exposeInMainWorld runs, so the page comes up with no bridge at all. For
+  // these two windows that is the worst possible outcome: diagnostics is what
+  // the user opens when everything looks broken, and settings is what they
+  // open to fix a configuration — a window whose own startup depends on the
+  // thing that is misconfigured.
+  for (const rel of ['diagnostics-preload.js', 'settings-preload.js']) {
+    const deps = requiresOf(rel)
+    assert(
+      deps.length === 1 && deps[0] === 'electron',
+      `${rel} requires only 'electron'`,
+      `${rel} requires [${deps.join(', ')}] — a local require in a sandboxed preload throws before exposeInMainWorld, leaving the page with no bridge at all`
+    )
+  }
+}
 
 // ── 3. Exported symbols other code depends on ──
 
@@ -441,6 +470,14 @@ const EXPECTED = [
   ['dsh-input.js', 'buildChatInsert'],
   ['dsh-input.js', 'buildInsertScript'],
   ['menu.js', 'setupMenu'],
+  ['settings-model.js', 'checkEditorTemplate'],
+  ['settings-model.js', 'normalizeTextField'],
+  ['settings-model.js', 'changedFields'],
+  ['settings-model.js', 'needsRestart'],
+  ['settings-model.js', 'RESTART_REQUIRED_FIELDS'],
+  ['settings-window.js', 'openSettingsWindow'],
+  ['settings-window.js', 'closeSettingsWindow'],
+  ['settings-window.js', 'notifySettingsSaved'],
 ]
 
 for (const [rel, name] of EXPECTED) {
@@ -892,11 +929,85 @@ async function checkLayoutPolicy() {
   )
 }
 
+/**
+ * Static guard for the settings window's correctness properties that are
+ * invisible until something has already gone wrong.
+ *
+ * Both halves concern input that arrives from a renderer and lands somewhere
+ * dangerous:
+ *
+ *  - the saved state is interpolated into CSS (a 0 blanks every panel), fed
+ *    to setBounds (NaN is rejected), persisted as the update channel (an
+ *    unknown id breaks the next launch) and passed to spawn();
+ *  - the editor "test open" points an external program at a file path, and the
+ *    prefs file is the one path it must never be.
+ *
+ * None of these fail loudly at the point of the mistake, which is why they are
+ * asserted against the source rather than left to review.
+ *
+ * Read from src/, not lib-new/: tsc rewrites imported calls to
+ * `(0, mod_1.fn)(...)`, so the anchors here have to match what is written.
+ */
+async function checkSettingsPolicy() {
+  const ipc = fs.readFileSync(path.join(ROOT, 'src', 'ipc-registry.ts'), 'utf-8')
+  // Comments stripped: this file quotes the very expressions under test.
+  const code = ipc
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  assert(
+    /isChannelId\s*\(/.test(code),
+    'settings:save validates the channel id',
+    "ipc-registry no longer checks isChannelId — an arbitrary string would be persisted as the update channel and break the next launch"
+  )
+  // Counted, not merely matched: the scale is normalised twice — once when
+  // the incoming state is coerced, and again at the point the value is handed
+  // to setUiScale and persisted. A plain `/…/.test()` passed with either one
+  // missing, which is exactly the mutation it is supposed to catch.
+  const scaleGuards = (code.match(/normalizeUiScale\s*\(/g) || []).length
+  assert(
+    scaleGuards >= 2,
+    'settings:save normalises the font scale on the way in and on the way out',
+    `ipc-registry normalises the font scale ${scaleGuards} time(s), expected at least 2 — a value from the renderer would reach CSS, where 0 or NaN renders every panel blank`
+  )
+  assert(
+    /normalizeTextField\s*\(/.test(code),
+    'settings:save sanitises the editor command and template',
+    'ipc-registry no longer calls normalizeTextField — raw renderer input would reach spawn() and the prefs file'
+  )
+  assert(
+    /changedFields\s*\(/.test(code),
+    'settings:save applies only what changed',
+    'ipc-registry no longer diffs the state — every save would reload the dsh page even when the theme did not change'
+  )
+
+  // The editor probe file must live in the OS temp directory.
+  assert(
+    /join\(tmpdir\(\)/.test(code) && /EDITOR_TEST_FILE/.test(code),
+    'settings:test-editor writes its probe into the OS temp directory',
+    'the editor probe file is no longer built from tmpdir() — a test button that opens a real project file would open something the user did not point at'
+  )
+  assert(
+    !/openInEditor\([^)]*prefsPath/.test(code),
+    'settings:test-editor never opens the prefs file',
+    'the editor probe opens the prefs file — one stray edit there is a corrupted configuration, reported much later as an unrelated failure'
+  )
+
+  // The settings window edits the configuration, so it must not depend on
+  // loading the modules that a bad configuration could have broken.
+  const sw = fs.readFileSync(path.join(ROOT, 'src', 'settings-window.ts'), 'utf-8')
+  assert(
+    /sandbox:\s*true/.test(sw),
+    'settings-window keeps its preload sandboxed',
+    'settings-window.ts no longer sets sandbox: true — the window a user opens to fix a broken configuration now depends on loading project modules'
+  )
+}
+
 function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 120
+  const MIN_ASSERTIONS = 150
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,
@@ -921,6 +1032,11 @@ checkBatchGuard()
   .catch((err) => {
     fail += 1
     console.error(`  FAIL layout policy threw: ${err && err.message}`)
+  })
+  .then(checkSettingsPolicy)
+  .catch((err) => {
+    fail += 1
+    console.error(`  FAIL settings policy threw: ${err && err.message}`)
   })
   .then(finalize)
 

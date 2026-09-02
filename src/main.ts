@@ -9,6 +9,7 @@
  */
 import { app, BrowserWindow, dialog, shell } from 'electron'
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { Launcher } from './launcher.js'
 import { loadCurrentThemeCSS } from './theme.js'
 import {
@@ -19,6 +20,7 @@ import {
   loadPanelPrefs,
   loadExternalEditor,
   saveExternalEditor,
+  prefsPath,
 } from './preferences.js'
 import { channelDef, normalizeChannel, type ChannelId } from './channels.js'
 import { createTray, destroyTray } from './tray.js'
@@ -37,6 +39,7 @@ import { FileTree } from './file-tree.js'
 import { GitService } from './git-service.js'
 import { SidebarService } from './sidebar-service.js'
 import { openDiagnosticsWindow, closeDiagnosticsWindow } from './diagnostics-window.js'
+import { openSettingsWindow, closeSettingsWindow } from './settings-window.js'
 
 // ── Startup hardening (must run before app ready) ──
 // 1. GPU 加速在虚拟机/远程桌面/部分驱动上会导致白屏或启动崩溃，本应用为 Web UI 外壳，无需 GPU。
@@ -355,6 +358,9 @@ function quitApp(): void {
   // Separate from the main window: it has its own process-lifetime handle, and
   // leaving it open would keep the app alive after everything else shut down.
   closeDiagnosticsWindow()
+  // Same reason as the diagnostics window: its own BrowserWindow would keep
+  // the app alive after the main window is gone.
+  closeSettingsWindow()
   try {
     if (mainWindow) {
       const b = mainWindow.getBounds()
@@ -829,6 +835,31 @@ function buildMenuActions(): MenuActions {
       pickEditorInteractively(mainWindow)
       // The 设置 menu shows the current editor in its disabled hint line.
       rebuildMenu()
+    },
+
+    openSettings: () => {
+      openSettingsWindow(() => {
+        // Several settings are mirrored by 视图 menu items (panel/sidebar/
+        // status bar visibility, font scale), and Electron bakes `checked`
+        // into the template at build time — without a rebuild the menu would
+        // keep showing the pre-edit state.
+        rebuildMenu()
+      })
+    },
+    revealPrefs: () => {
+      // Worth having even though the settings window offers the same action:
+      // it is the escape hatch when that window will not open, and the prefs
+      // are plain JSON that can always be edited by hand.
+      const p = prefsPath()
+      if (existsSync(p)) {
+        shell.showItemInFolder(p)
+        return
+      }
+      // No file yet — nothing has been saved, so the prefs are still at their
+      // defaults. Opening the containing directory is where it will appear.
+      void shell.openPath(join(p, '..')).then((e) => {
+        if (e) log('launcher', `打开配置目录失败：${e}`)
+      })
     },
   }
 }

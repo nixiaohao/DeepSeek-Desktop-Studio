@@ -75,6 +75,19 @@ const BRIDGES = [
     html: [path.join('assets', 'diagnostics.html')],
     minMethods: 3,
   },
+  // The settings window, for the same reason as diagnostics: it is where a
+  // user goes when something is misconfigured, so an unregistered channel
+  // would fail silently at the one moment they have nowhere else to turn.
+  // Its floor is the highest of the sandboxed pair simply because it has the
+  // most surface — read, save, browse, test, reveal, describe, relaunch.
+  {
+    name: 'settings',
+    preload: 'settings-preload.ts',
+    world: 'dshSettings',
+    ns: 'settings:',
+    html: [path.join('assets', 'settings.html')],
+    minMethods: 6,
+  },
 ]
 
 /**
@@ -209,6 +222,23 @@ for (const bridge of BRIDGES) {
       `${asset} calls the bridge (${used.size} methods)`,
       `${asset} never touches api.* — is the script tag gone?`
     )
+    // The page and the preload must also agree on the NAME the bridge is
+    // reached through. `usedMethods()` only reads `api.<fn>()` call sites, so a
+    // page that read `window.dshSettingsX` — a typo, or a rename that missed
+    // one file — still looks perfectly healthy above and fails only at
+    // runtime: the page renders, and every control in it does nothing at all.
+    //
+    // This matches the ASSIGNMENT, not merely the name: these pages quote the
+    // bridge name inside their own "preload did not run" error message (see
+    // settings.html), so a plain `window.dshSettings\b` test passes on a page
+    // whose only remaining mention of the name is a string it prints to the
+    // user. Requiring `= window.<name>` is what makes it a binding check.
+    assert(
+      new RegExp(`=\\s*window\\.${bridge.world}\\s*[;,)]`).test(html),
+      `${asset} binds window.${bridge.world}`,
+      `${asset} never assigns window.${bridge.world} — that is the name ${bridge.preload} exposes, so every api.* call in the page would hit undefined`
+    )
+
     for (const name of used) {
       assert(
         exposed.has(name),
@@ -454,6 +484,22 @@ for (const asset of RESIZER_PAGES) {
  * has its own preload and no dshPanel bridge, so it is not in ALL_PAGES, but it
  * shares the type scale and must obey the same rule.
  */
+/**
+ * Flat `{ selector { body } }` pairs from a stylesheet.
+ *
+ * Nested at-rules (@media, @keyframes) would need a real parser; none of the
+ * pages under test use one, and the flat scan is what keeps the check below
+ * readable. If a page ever grows an @media block, extend this rather than
+ * weakening the assertion.
+ */
+function cssRules(css) {
+  const out = []
+  const re = /([^{}]+)\{([^{}]*)\}/g
+  let m
+  while ((m = re.exec(css)) !== null) out.push({ selector: m[1], body: m[2] })
+  return out
+}
+
 console.log('panel-api: panel type scale')
 
 const TYPE_SCALE_PAGES = [
@@ -461,6 +507,7 @@ const TYPE_SCALE_PAGES = [
   path.join('assets', 'sidebar.html'),
   path.join('assets', 'statusbar.html'),
   path.join('assets', 'diagnostics.html'),
+  path.join('assets', 'settings.html'),
 ]
 
 for (const asset of TYPE_SCALE_PAGES) {
@@ -510,6 +557,37 @@ for (const asset of TYPE_SCALE_PAGES) {
     `${asset}: no px-bearing font shorthand`,
     `${asset} uses the font shorthand (${shorthand.join(', ')}) — split into font-family/font-size/line-height so it scales`
   )
+
+  // ── Form controls need the token spelled out for them ──
+  //
+  // Chromium does not inherit font-family/font-size from <body> into
+  // <button>/<input>/<select>/<textarea>: an unstyled control falls back to the
+  // browser default (~11px), which is the very "too small to read" report the
+  // type scale exists to fix. Declaring the tokens on body is not enough —
+  // every control has to restate them.
+  //
+  // Presence is detected through createElement()/el() as well as through
+  // literal markup, because the settings page builds its whole form in script.
+  const markup = html.replace(/<style>[\s\S]*?<\/style>/g, '').replace(/<!--[\s\S]*?-->/g, '')
+  for (const tag of ['button', 'select', 'textarea', 'input']) {
+    const built = new RegExp(`createElement\\(\\s*['"]${tag}['"]|el\\(\\s*['"]${tag}['"]`, 'i')
+    let needed = built.test(markup) || new RegExp(`<${tag}\\b`, 'i').test(markup)
+    if (tag === 'input' && needed && !built.test(markup)) {
+      // A bare checkbox/radio paints no text, so it does not need a size.
+      // Inputs the script builds are of unknown type, so they stay required.
+      const inputs = [...markup.matchAll(/<input\b[^>]*>/gi)].map((m) => m[0])
+      needed = inputs.some((t) => !/type\s*=\s*["']?(checkbox|radio)/i.test(t))
+    }
+    if (!needed) continue
+    const covered = cssRules(css).some(
+      (r) => new RegExp(`\\b${tag}\\b`).test(r.selector) && /font-size:\s*var\(--fs-/.test(r.body)
+    )
+    assert(
+      covered,
+      `${asset}: <${tag}> takes its font-size from an --fs-* token`,
+      `${asset} builds <${tag}> but no rule gives it a font-size from the type scale — Chromium form controls do not inherit body font, so it renders at the browser default (~11px)`
+    )
+  }
 }
 
 // ── 4. Every inline script must actually parse ──

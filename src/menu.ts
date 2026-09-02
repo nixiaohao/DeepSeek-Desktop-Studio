@@ -56,6 +56,24 @@ export interface MenuActions {
   /** Human-readable description of the current editor. */
   describeEditor: () => string
   chooseEditor: () => void
+
+  // ── settings ──
+  /**
+   * Open the standalone settings window.
+   *
+   * Everything below is also reachable from there; keeping the menu entries
+   * is deliberate, because this window is the one place the user goes when
+   * something is misconfigured and it must not be the only way in.
+   */
+  openSettings: () => void
+  /**
+   * Reveal ~/.dsh/studio-prefs.json in the file manager.
+   *
+   * The fallback for the worst case: if the settings window will not open, the
+   * prefs are still a plain JSON file that can be edited by hand, and this is
+   * how the user finds it.
+   */
+  revealPrefs: () => void
 }
 
 /**
@@ -167,6 +185,12 @@ export function setupMenu(actions: MenuActions): void {
     {
       label: '设置',
       submenu: [
+        {
+          label: '设置…',
+          accelerator: 'Ctrl+,',
+          click: () => actions.openSettings(),
+        },
+        { type: 'separator' },
         { label: `外部编辑器：${actions.describeEditor()}`, enabled: false },
         {
           label: '选择外部编辑器…',
@@ -190,6 +214,11 @@ export function setupMenu(actions: MenuActions): void {
               buttons: ['确定'],
             })
           },
+        },
+        { type: 'separator' },
+        {
+          label: '打开配置文件',
+          click: () => actions.revealPrefs(),
         },
       ],
     },
