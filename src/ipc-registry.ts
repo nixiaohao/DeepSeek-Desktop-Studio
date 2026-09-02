@@ -453,6 +453,33 @@ export function registerIpc(deps: IpcDeps): () => void {
 
   ipcMain.handle('sidebar:snapshot', () => deps.getSidebar?.()?.snapshot() ?? EMPTY_SIDEBAR)
 
+  /**
+   * The session navigator's rows: main sessions (subagents excluded — they
+   * are the agent's internals, not things a user switches between) with the
+   * log-backed title merged in from the 'title' projection. Newest first;
+   * the store's own poll keeps running/updatedAt current.
+   */
+  ipcMain.handle('sidebar:sessions', () => {
+    const store = deps.getStream?.()?.store
+    if (!store) return []
+    const snap = store.snapshot()
+    const titles = new Map<string, string>()
+    for (const p of store.projectionEntries()) {
+      if (p.key === 'title' && typeof p.value === 'string' && p.value.length > 0) {
+        titles.set(p.sessionId, p.value)
+      }
+    }
+    return snap.sessions
+      .filter((s) => !s.parentSessionId)
+      .map((s) => ({
+        sessionId: s.sessionId,
+        cwd: s.cwd,
+        running: s.running,
+        updatedAt: s.updatedAt,
+        title: titles.get(s.sessionId),
+      }))
+  })
+
   ipcMain.handle('sidebar:set-root', async (_e, dir: unknown) => {
     const sidebar = deps.getSidebar?.() ?? null
     if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }

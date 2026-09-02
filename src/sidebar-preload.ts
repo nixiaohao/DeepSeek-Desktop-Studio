@@ -68,6 +68,18 @@ contextBridge.exposeInMainWorld('dshSidebar', {
   setRoot: (dir: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('sidebar:set-root', dir),
 
+  /**
+   * Session navigator rows: main sessions with log-backed titles, newest
+   * first. cwd rides along so a click can re-root the file tree.
+   */
+  sessions: (): Promise<{
+    sessionId: string
+    cwd?: string
+    running: boolean
+    updatedAt: number
+    title?: string
+  }[]> => ipcRenderer.invoke('sidebar:sessions'),
+
   /** Native directory picker. Returns '' when cancelled. */
   pickDir: (): Promise<string> => ipcRenderer.invoke('sidebar:pick-dir'),
 

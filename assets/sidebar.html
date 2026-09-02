@@ -179,8 +179,7 @@
 
   /* ── tree ── */
   #treeWrap { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
-  #tree { flex: 1; overflow: auto; padding: 3px 0; }
-  #tree .row {
+  #tree { flex: 1; overflow: auto; padding: 3px 0; }  #tree .row {
     display: flex; align-items: center; gap: 4px; padding: 2px 5px;
     cursor: pointer; white-space: nowrap; font-size: var(--fs-md);
   }
@@ -221,6 +220,40 @@
   }
   #menu div { padding: 4px 10px; font-size: var(--fs-md); cursor: pointer; }
   #menu div:hover { background: var(--accent); color: #fff; }
+  /* ── view tabs (文件 | 会话) ── */
+  #viewTabs {
+    flex: none; display: flex; gap: 2px; padding: 4px 6px 0;
+    background: var(--bg-2); border-bottom: 1px solid var(--border);
+  }
+  #viewTabs .vtab {
+    border: 1px solid var(--border); border-bottom: none;
+    border-radius: 4px 4px 0 0; background: transparent; color: var(--fg-dim);
+    padding: 4px 12px; font-size: var(--fs-md); font-family: var(--font-ui);
+    cursor: pointer;
+  }
+  #viewTabs .vtab.on {
+    color: var(--fg); background: var(--bg);
+    border-color: var(--accent);
+  }
+
+  /* ── session navigator (会话 view) ── */
+  #sessionWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #sessionList { flex: 1; overflow: auto; padding: 4px 0; }
+  .grp {
+    padding: 5px 8px 3px; font-size: var(--fs-sm); color: var(--fg-dim);
+    background: var(--bg-2); border-top: 1px solid var(--border);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .grp:first-child { border-top: none; }
+  .sess {
+    display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+    cursor: pointer; font-size: var(--fs-md); white-space: nowrap;
+  }
+  .sess:hover { background: var(--bg-3); }
+  .sess .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+  .sess .dot.run { background: #3ddc84; }
+  .sess .st { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .sess .tm { flex: none; color: var(--fg-dim); font-size: var(--fs-sm); }
 </style>
 </head>
 <body>
@@ -264,6 +297,15 @@
   <div id="treeWrap">
     <div class="sec-title"><span>目录</span></div>
     <div id="tree"></div>
+  </div>
+
+  <div id="viewTabs">
+    <button class="vtab on" data-v="files">文件</button>
+    <button class="vtab" data-v="sessions">会话</button>
+  </div>
+
+  <div id="sessionWrap" style="display:none">
+    <div id="sessionList"><div class="empty" style="padding:8px">加载中…</div></div>
   </div>
 
   <div id="foot" style="display:none"></div>
@@ -578,6 +620,8 @@
     api.snapshot().then(render).catch(function (e) {
       treeEl.innerHTML = '<div class="empty">读取失败：' + esc(String(e && e.message || e)) + '</div>';
     });
+    // Live running/updatedAt refresh while the navigator is on screen.
+    if (sidebarView === 'sessions') pullSessions();
   }
 
   /**
@@ -810,6 +854,119 @@
     if (rootNameEl.className.indexOf('pick') < 0) return;
     openSuggMenu(e.clientX, e.clientY + 6);
   });
+
+  // ── view tabs (文件 | 会话) ────────────────────────────────────────────
+
+  var sidebarView = 'files';
+  var viewTabsEl = document.getElementById('viewTabs');
+  var sessionListEl = document.getElementById('sessionList');
+
+  function setView(v) {
+    sidebarView = v;
+    for (var i = 0; i < viewTabsEl.children.length; i++) {
+      viewTabsEl.children[i].classList.toggle('on', viewTabsEl.children[i].dataset.v === v);
+    }
+    var files = v === 'files';
+    // File-only surfaces follow the file view; the session view is read-only
+    // navigation and owns the whole column.
+    document.getElementById('treeWrap').style.display = files ? '' : 'none';
+    document.getElementById('sessionWrap').style.display = files ? 'none' : '';
+    document.getElementById('git').style.display = files ? '' : 'none';
+    document.getElementById('changedWrap').style.display = files ? '' : 'none';
+    if (files) { repaint(); } else { pullSessions(); }
+  }
+
+  viewTabsEl.addEventListener('click', function (e) {
+    var t = e.target.closest ? e.target.closest('.vtab') : null;
+    if (t) setView(t.dataset.v);
+  });
+
+  function relTime(ts) {
+    if (typeof ts !== 'number' || !ts) return '';
+    var d = Date.now() - ts;
+    if (d < 60000) return '刚刚';
+    if (d < 3600000) return Math.floor(d / 60000) + ' 分钟前';
+    if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
+    return Math.floor(d / 86400000) + ' 天前';
+  }
+
+  function renderSessions(list) {
+    sessionListEl.textContent = '';
+    if (!list || !list.length) {
+      var e0 = document.createElement('div');
+      e0.className = 'empty';
+      e0.style.padding = '8px';
+      e0.textContent = '还没有会话。dsh 跑起来后这里会按项目列出。';
+      sessionListEl.appendChild(e0);
+      return;
+    }
+    // Group by cwd (Reasonix's 项目); groups ordered by their newest session.
+    var groups = {};
+    var order = [];
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      var key = s.cwd || '';
+      if (!groups[key]) { groups[key] = []; order.push(key); }
+      groups[key].push(s);
+    }
+    order.sort(function (a, b) {
+      return (groups[b][0].updatedAt || 0) - (groups[a][0].updatedAt || 0);
+    });
+    for (var g = 0; g < order.length; g++) {
+      var cwd = order[g];
+      var rows = groups[cwd];
+      var grp = document.createElement('div');
+      grp.className = 'grp';
+      grp.textContent = cwd ? shortName(cwd) : '未指定目录';
+      grp.title = cwd || '';
+      sessionListEl.appendChild(grp);
+      for (var r = 0; r < rows.length; r++) {
+        (function (sess) {
+          var row = document.createElement('div');
+          row.className = 'sess';
+          var dot = document.createElement('span');
+          dot.className = 'dot' + (sess.running ? ' run' : '');
+          var st = document.createElement('span');
+          st.className = 'st';
+          st.textContent = sess.title || '未命名会话';
+          st.title = sess.title || sess.sessionId;
+          var tm = document.createElement('span');
+          tm.className = 'tm';
+          tm.textContent = relTime(sess.updatedAt);
+          row.appendChild(dot);
+          row.appendChild(st);
+          row.appendChild(tm);
+          // A click re-roots the file tree at the session's directory and
+          // flips back to 文件 — navigation, not session switching (which
+          // stays inside dsh's own UI by design).
+          row.onclick = function () {
+            if (!sess.cwd || sess.cwd === lastSnap.root) return;
+            api.setRoot(sess.cwd).then(function (res) {
+              if (res && res.ok) {
+                toast('已定位到 ' + shortName(sess.cwd));
+                setView('files');
+              } else {
+                report(res);
+              }
+            }).catch(function () { toast('切换失败', true); });
+          };
+          sessionListEl.appendChild(row);
+        })(rows[r]);
+      }
+    }
+  }
+
+  function pullSessions() {
+    if (!api.sessions) return;
+    api.sessions().then(renderSessions).catch(function () {
+      sessionListEl.textContent = '';
+      var e1 = document.createElement('div');
+      e1.className = 'empty';
+      e1.style.padding = '8px';
+      e1.textContent = '会话列表不可用（dsh 未连接）。';
+      sessionListEl.appendChild(e1);
+    });
+  }
 
   $('btn-commit').addEventListener('click', function () {
     var msg = $('commitMsg').value;

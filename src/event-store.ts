@@ -151,6 +151,9 @@ const KEPT_PROJECTION_KEYS = new Set([
   // (system/tools/messages). Same higher-seq-wins rule as the other keys.
   'contextPressure',
   'contextBreakdown',
+  // Session navigator: upstream's log-backed title (session-title package),
+  // wire view is a plain string or null. Read-time merged into SessionInfo.
+  'title',
 ])
 
 /**

@@ -464,15 +464,18 @@ check('kept projection keys are stored and flattened by projectionEntries', () =
   // The session-overview keys are kept too (context occupancy + composition).
   s.feed({ type: 'session/projection', sessionId: 'm', key: 'contextPressure', value: { contextWindow: 1000, pressureTokens: 120 }, seq: 4 })
   s.feed({ type: 'session/projection', sessionId: 'm', key: 'contextBreakdown', value: { systemTokens: 500, toolsTokens: 1200, messageTokens: 3000 }, seq: 5 })
+  // The session navigator's log-backed title (upstream session-title package).
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'title', value: '修复侧栏塌缩', seq: 6 })
   // An unkept key must not be stored — a chatty future projection cannot grow
   // the store.
   s.feed({ type: 'session/projection', sessionId: 'm', key: 'someFutureProjection', value: {}, seq: 9 })
   const flat = s.projectionEntries()
-  assert.strictEqual(flat.length, 4)
+  assert.strictEqual(flat.length, 5)
   assert.ok(flat.some((p) => p.key === 'sessionStats' && p.value.llmMs === 1000))
   assert.ok(flat.some((p) => p.key === 'tokenUsage' && p.value.outputTokens === 5))
   assert.ok(flat.some((p) => p.key === 'contextPressure' && p.value.contextWindow === 1000))
   assert.ok(flat.some((p) => p.key === 'contextBreakdown' && p.value.toolsTokens === 1200))
+  assert.ok(flat.some((p) => p.key === 'title' && p.value === '修复侧栏塌缩'))
   assert.ok(!flat.some((p) => p.key === 'someFutureProjection'))
 })
 
