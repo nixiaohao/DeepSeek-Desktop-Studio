@@ -589,6 +589,47 @@ export function registerIpc(deps: IpcDeps): () => void {
     return sidebar.commit(typeof message === 'string' ? message : '')
   })
 
+  // ── Sidebar: destructive git operations ──
+  //
+  // The page owns the §3.8 double-confirm; these handlers own the machine
+  // guards, which re-verify everything (managed directory, index lock, file
+  // status, branch-name shape) before git runs. A stale page or a crafted
+  // message cannot skip either layer.
+
+  ipcMain.handle('sidebar:branches', async () => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    return sidebar.branches()
+  })
+
+  ipcMain.handle('sidebar:checkout', async (_e, name: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    if (typeof name !== 'string') return { ok: false, error: '分支名无效' }
+    return sidebar.checkoutBranch(name)
+  })
+
+  const DISCARD_KEYS = ['staged', 'unstaged', 'untracked'] as const
+
+  ipcMain.handle('sidebar:discard', async (_e, path: unknown, status: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    if (typeof path !== 'string' || path.length === 0) return { ok: false, error: '空路径' }
+    const src = (status && typeof status === 'object' ? status : {}) as Record<string, unknown>
+    // Booleans only: a renderer that sends `status.unstaged = 'yes'` gets a
+    // refusal, not a coercion — discard destroys work and deserves strictness.
+    const flags: { staged: boolean; unstaged: boolean; untracked: boolean } = {
+      staged: false,
+      unstaged: false,
+      untracked: false,
+    }
+    for (const k of DISCARD_KEYS) {
+      if (typeof src[k] !== 'boolean') return { ok: false, error: '文件状态无效' }
+      flags[k] = src[k]
+    }
+    return sidebar.discardFile(path, flags)
+  })
+
 
   ipcMain.handle('sidebar:set-width', (_e, w: number) => {
     if (typeof w !== 'number' || !Number.isFinite(w)) return

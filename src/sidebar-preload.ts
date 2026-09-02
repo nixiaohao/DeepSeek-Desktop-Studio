@@ -138,6 +138,27 @@ contextBridge.exposeInMainWorld('dshSidebar', {
   commit: (message: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('sidebar:commit', message),
 
+  // ── destructive git operations (double-confirm lives in the page) ──
+
+  /** Local branches, current one first and marked. */
+  branches: (): Promise<{ ok: boolean; branches?: { name: string; current: boolean }[]; error?: string }> =>
+    ipcRenderer.invoke('sidebar:branches'),
+
+  /** Switch to a local branch. */
+  checkoutBranch: (name: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sidebar:checkout', name),
+
+  /**
+   * Discard ONE file's unstaged changes. The caller supplies the status
+   * flags it already rendered; the main process re-checks them against git's
+   * own view before touching anything.
+   */
+  discardFile: (
+    path: string,
+    status: { staged: boolean; unstaged: boolean; untracked: boolean },
+  ): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sidebar:discard', path, status),
+
   /** True when this page is running inside Electron with the bridge installed. */
   ready: (): boolean => true,
 

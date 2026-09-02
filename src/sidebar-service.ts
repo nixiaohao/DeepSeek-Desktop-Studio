@@ -258,6 +258,33 @@ export class SidebarService {
     return this.write(() => this.git.commit(this.tree.root, message))
   }
 
+  // ── destructive git operations ──
+  //
+  // Same forwarder shape as the writes above (the page's double-confirm is
+  // the §3.8 human gate; these invalidate the cache afterwards so the panel
+  // cannot show a tree that no longer exists).
+
+  /** Local branches of the current root, current one marked. */
+  async branches(): Promise<
+    { ok: boolean; branches?: { name: string; current: boolean }[]; error?: string }
+  > {
+    if (!this.tree.root) return { ok: false, error: '尚未选择目录' }
+    return this.git.listBranches(this.tree.root)
+  }
+
+  /** Switch the current root's repo to a local branch. */
+  async checkoutBranch(name: string): Promise<GitWriteResult> {
+    return this.write(() => this.git.checkoutBranch(this.tree.root, name))
+  }
+
+  /** Discard ONE file's unstaged changes (worktree → index). */
+  async discardFile(
+    path: string,
+    status: { staged: boolean; unstaged: boolean; untracked: boolean },
+  ): Promise<GitWriteResult> {
+    return this.write(() => this.git.discardFile(this.tree.root, path, status))
+  }
+
   private async write(run: () => Promise<GitWriteResult>): Promise<GitWriteResult> {
     if (!this.tree.root) return { ok: false, error: '尚未选择目录' }
     const r = await run()

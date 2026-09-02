@@ -332,6 +332,88 @@ async diffText(dir: string, file: string, opts: { staged?: boolean } = {}): Prom
     return out
   }
 
+  // ── destructive operations (checkout / discard) ──
+  //
+  // These DESTROY uncommitted work — that is their purpose — so they carry
+  // one extra requirement beyond the three write guards: the confirmation is
+  // the page's job (docs/analysis-2026-09-01 §3.8: "checkout 等破坏性操作
+  // 二次确认"), but these server-side limits make a confirmed mistake as
+  // small as it can be:
+  //
+  //   - discardFile only touches files that are tracked AND have unstaged
+  //     changes (restored from the index). Staged content survives — the
+  //     user explicitly staged it, so a stray click must not take it too.
+  //     Untracked files are refused outright: `checkout --` cannot remove
+  //     them, and deleting them is a different, bigger decision.
+  //   - checkoutBranch validates the branch name against a conservative
+  //     pattern, so a renderer string can never become a git option.
+
+  /** Local branches, current one first and marked. */
+  async listBranches(dir: string): Promise<{ ok: boolean; branches?: { name: string; current: boolean }[]; error?: string }> {
+    if (!dir) return { ok: false, error: '目录为空' }
+    if (this.isWriteLocked(dir)) return { ok: false, error: '此目录由自动更新管理，禁止写操作' }
+    const run = await this.run(dir, ['branch', '--format=%(refname:short)'])
+    if (run.error) return { ok: false, error: run.error }
+    if (run.code !== 0) {
+      return { ok: false, error: run.stderr.trim() || `git branch 退出码 ${run.code}` }
+    }
+    // `git branch` marks the current branch with `* ` (and `+` for worktrees,
+    // which are NOT this worktree's current branch — leave them unmarked).
+    // The marker is stripped from every name first; the current detection
+    // then looks at the raw lines.
+    const branches = run.stdout
+      .split('\n')
+      .map((line) => line.replace(/^[*+]\s+/, '').trim())
+      .filter((line) => line.length > 0)
+      .map((name) => ({ name, current: false }))
+    const current = run.stdout.split('\n').find((line) => line.startsWith('* '))
+    if (current) {
+      const name = current.replace(/^[*+]\s+/, '').trim()
+      const mark = branches.find((b) => b.name === name)
+      if (mark) mark.current = true
+    }
+    return { ok: true, branches }
+  }
+
+  /**
+   * Switch to a local branch. Git itself refuses when uncommitted changes
+   * would be clobbered; that refusal is surfaced verbatim, not worked
+   * around — silently stashing would be the destructive surprise here.
+   */
+  async checkoutBranch(dir: string, branch: string): Promise<GitWriteResult> {
+    const guard = await this.guardWrite(dir)
+    if (guard) return { ok: false, error: guard }
+    if (!isSafeBranchName(branch)) return { ok: false, error: '分支名无效' }
+    const run = await this.run(dir, ['checkout', branch])
+    if (run.error) return { ok: false, error: run.error }
+    if (run.code !== 0) {
+      return { ok: false, error: run.stderr.trim() || `git checkout 退出码 ${run.code}` }
+    }
+    return { ok: true }
+  }
+
+  /**
+   * Discard ONE file's unstaged changes (worktree → index).
+   *
+   * Refuses untracked files (nothing to restore from) and files with no
+   * unstaged side — a click on a clean row must be a no-op, not an accident
+   * waiting for a second one.
+   */
+  async discardFile(dir: string, file: string, status: { staged: boolean; unstaged: boolean; untracked: boolean }): Promise<GitWriteResult> {
+    const guard = await this.guardWrite(dir)
+    if (guard) return { ok: false, error: guard }
+    if (typeof file !== 'string' || file.length === 0) return { ok: false, error: '空路径' }
+    if (!isSafeDiffPath(dir, file)) return { ok: false, error: '路径不在该目录内' }
+    if (status.untracked) return { ok: false, error: '未跟踪文件没有可放弃的基线，请直接删除文件' }
+    if (!status.unstaged) return { ok: false, error: '该文件没有未暂存的改动' }
+    const run = await this.run(dir, ['checkout', '--', file])
+    if (run.error) return { ok: false, error: run.error }
+    if (run.code !== 0) {
+      return { ok: false, error: run.stderr.trim() || `git checkout 退出码 ${run.code}` }
+    }
+    return { ok: true }
+  }
+
   /**
    * Run one git command. Never rejects; failures come back in the result.
    *
@@ -438,6 +520,19 @@ function isSafeDiffPath(dir: string, file: string): boolean {
   const isAbsolute = normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.startsWith('//')
   if (!isAbsolute) return true
   return isWithinRoot(dir, file)
+}
+
+/**
+ * Conservative branch-name check for strings that crossed the IPC boundary.
+ * Local branches are letters/digits plus `._/-` separators; ruling out
+ * leading `-` and whitespace means the name can never be parsed as a git
+ * option or smuggle extra arguments.
+ */
+export function isSafeBranchName(name: string): boolean {
+  return typeof name === 'string' &&
+    name.length > 0 &&
+    name.length <= 200 &&
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
 }
 
 /**

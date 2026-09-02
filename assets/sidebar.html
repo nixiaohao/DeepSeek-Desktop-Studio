@@ -90,6 +90,8 @@
     color: var(--fg); background: var(--bg-3); border: 1px solid var(--border);
     border-radius: 9px; padding: 1px 8px; font-size: var(--fs-sm);
   }
+  #branch.pick { cursor: pointer; }
+  #branch.pick:hover { border-color: var(--accent); color: #fff; }
   #counts span { margin-right: 7px; }
   #counts .staged { color: var(--ok); }
   #counts .unstaged { color: var(--warn); }
@@ -129,6 +131,12 @@
     font-size: var(--fs-sm); font-family: var(--font-ui); cursor: pointer;
   }
   .file .act:hover { color: #fff; border-color: var(--accent); }
+  /* The armed (first-click) state of a discard button: red, because the next
+     click DESTROYS the file's unstaged changes. */
+  .file .act.armed {
+    color: #fff; background: var(--err); border-color: var(--err);
+    width: auto; padding: 0 4px;
+  }
 
   /* ── commit bar ── */
   #commitBar {
@@ -288,6 +296,9 @@
   var repaintTimer = null;
   var toastTimer = null;
   var menuTarget = '';
+  var menuMode = 'file';   // 'file' = path actions, 'branch' = branch switch
+  var gitWriteLocked = false;  // destructive actions are hidden while true
+  var armedDiscard = null; // { btn, path, timer } — the double-confirm state
 
   // ── helpers ──────────────────────────────────────────────────────────
 
@@ -331,9 +342,14 @@
 
   function renderGit(git) {
     var branchEl = $('branch');
+    gitWriteLocked = !!git.writeLocked;
     if (git.isRepo && git.branch) {
       branchEl.textContent = git.branch;
       branchEl.style.display = '';
+      // Clickable only where switching is possible; the note below explains
+      // the managed-directory case.
+      branchEl.className = (!gitWriteLocked && !git.error) ? 'pick' : '';
+      branchEl.title = (!gitWriteLocked && !git.error) ? '点击切换分支' : '';
     } else {
       branchEl.style.display = 'none';
     }
@@ -386,6 +402,11 @@
       if (!git.writeLocked) {
         if (f.staged) acts += '<button class="act" data-act="unstage" title="取消暂存">−</button>';
         if (!f.staged) acts += '<button class="act" data-act="stage" title="暂存">＋</button>';
+        // Discard (worktree → index): tracked files with unstaged changes
+        // only, and it needs the double-confirm below before it fires.
+        if (!f.untracked && f.unstaged) {
+          acts += '<button class="act" data-act="discard" title="放弃未暂存的改动">↩</button>';
+        }
       }
       html +=
         '<div class="file' + (f.path === selected ? ' on' : '') + '" data-p="' + esc(f.path) + '">' +
@@ -584,10 +605,50 @@
   function closeMenu() {
     menuEl.style.display = 'none';
     menuTarget = '';
+    menuMode = 'file';
+  }
+
+  /**
+   * Branch switcher under the branch chip.
+   *
+   * Loads the branch list when opened rather than caching it: a stale list
+   * would offer branches that no longer exist and hide the one just created.
+   */
+  function openBranchMenu(x, y) {
+    api.branches().then(function (r) {
+      if (!r || !r.ok) {
+        toast((r && r.error) || '无法读取分支', true);
+        return;
+      }
+      menuMode = 'branch';
+      var html = '';
+      for (var i = 0; i < r.branches.length; i++) {
+        var b = r.branches[i];
+        html += '<div data-a="checkout" data-b="' + esc(b.name) + '">' +
+          (b.current ? '● ' : '') + esc(b.name) + '</div>';
+      }
+      menuEl.innerHTML = html;
+      menuEl.style.display = 'block';
+      var w = menuEl.offsetWidth, h = menuEl.offsetHeight;
+      menuEl.style.left = Math.min(x, window.innerWidth - w - 4) + 'px';
+      menuEl.style.top = Math.min(y, window.innerHeight - h - 4) + 'px';
+    }).catch(function () { toast('无法读取分支', true); });
   }
 
   menuEl.addEventListener('click', function (e) {
     var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
+    // Branch mode carries the branch name on the row, not in menuTarget.
+    if (menuMode === 'branch') {
+      closeMenu();
+      var b = e.target && e.target.getAttribute && e.target.getAttribute('data-b');
+      if (a === 'checkout' && b) {
+        api.checkoutBranch(b).then(function (r) {
+          if (r && r.ok) toast('已切换到 ' + b);
+          else report(r);
+        }).catch(function () { toast('切换失败', true); });
+      }
+      return;
+    }
     var p = menuTarget;
     closeMenu();
     if (!a || !p) return;
@@ -639,13 +700,34 @@
       var p = act.closest('.file').getAttribute('data-p');
       var kind = act.getAttribute('data-act');
       if (!p) return;
-      var call = kind === 'stage' ? api.stageFiles([p]) : api.unstageFiles([p]);
-      call.then(function (r) {
-        if (r && r.ok) toast(kind === 'stage' ? '已暂存' : '已取消暂存');
-        else report(r);
-        // No manual refresh needed: SidebarService forces one after every
-        // write and announces it through onUpdate → repaint.
-      }).catch(function () { toast('操作失败', true); });
+      if (kind === 'stage' || kind === 'unstage') {
+        var call = kind === 'stage' ? api.stageFiles([p]) : api.unstageFiles([p]);
+        call.then(function (r) {
+          if (r && r.ok) toast(kind === 'stage' ? '已暂存' : '已取消暂存');
+          else report(r);
+          // No manual refresh needed: SidebarService forces one after every
+          // write and announces it through onUpdate → repaint.
+        }).catch(function () { toast('操作失败', true); });
+        return;
+      }
+      // Discard is DESTRUCTIVE: it throws away the file's unstaged changes.
+      // §3.8 requires a second confirmation — the first click arms the button
+      // (red, "确认"), and only a second click within the window executes.
+      if (kind === 'discard') {
+        if (!armedDiscard || armedDiscard.path !== p) {
+          disarmDiscard();
+          armedDiscard = { btn: act, path: p, timer: setTimeout(disarmDiscard, 4000) };
+          act.classList.add('armed');
+          act.textContent = '确认';
+          return;
+        }
+        disarmDiscard();
+        api.discardFile(p, { staged: false, unstaged: true, untracked: false }).then(function (r) {
+          if (r && r.ok) toast('已放弃未暂存的改动');
+          else report(r);
+        }).catch(function () { toast('操作失败', true); });
+        return;
+      }
       return;
     }
     var row = e.target.closest ? e.target.closest('.file') : null;
@@ -654,6 +736,23 @@
     if (!p) return;
     if (p === selected) hideDiff();
     else showDiff(p);
+  });
+
+  /** Un-arm a pending discard (timeout, other click, or repaint). */
+  function disarmDiscard() {
+    if (!armedDiscard) return;
+    clearTimeout(armedDiscard.timer);
+    if (armedDiscard.btn && armedDiscard.btn.isConnected) {
+      armedDiscard.btn.classList.remove('armed');
+      armedDiscard.btn.textContent = '↩';
+    }
+    armedDiscard = null;
+  }
+
+  // Switching branches from the chip — hidden where writes are refused.
+  $('branch').addEventListener('click', function (e) {
+    if (gitWriteLocked) return;
+    openBranchMenu(e.clientX, e.clientY + 6);
   });
 
   $('btn-commit').addEventListener('click', function () {

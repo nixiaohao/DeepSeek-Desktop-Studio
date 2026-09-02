@@ -21,6 +21,7 @@ const {
   MAX_DIFF_CHARS,
   WRITE_FILE_LIMIT,
   looksLikeRepo,
+  isSafeBranchName,
 } = require(path.join(__dirname, '..', 'lib-new', 'git-service.js'))
 
 let pass = 0
@@ -450,6 +451,115 @@ async function main() {
     const r = await svc.commit(tmp, 'msg')
     check('ok is false', r.ok, false)
     check('stderr is the error', r.error, 'nothing to commit')
+  })
+
+  // ── destructive operations: branches / discard ──
+
+  console.log('git-service: destructive operations (checkout / discard)')
+
+  await section('listBranches marks the current branch only', async () => {
+    const f = fakeSpawn((cmd, args) => {
+      if (args[0] === '--version') return { code: 0, stdout: 'git version 2.45.0\n' }
+      if (args[0] === 'branch') return { code: 0, stdout: '  dev\n* main\n+ wt\n' }
+      return { code: 0, stdout: '' }
+    })
+    const svc = new GitService({ spawn: f.spawnFn })
+    const r = await svc.listBranches(tmp)
+    check('ok', r.ok, true)
+    check('three branches parsed', r.branches.length, 3)
+    check('names trimmed', r.branches.map((b) => b.name), ['dev', 'main', 'wt'])
+    check('current is main only', r.branches.filter((b) => b.current).map((b) => b.name), ['main'])
+  })
+
+  await section('listBranches refuses the managed directory', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const svc = new GitService({ spawn: f.spawnFn, getManagedDir: () => tmp })
+    const r = await svc.listBranches(tmp)
+    check('ok is false', r.ok, false)
+    check('no git call', f.calls.length, 0)
+  })
+
+  await section('checkoutBranch validates the name before spawning', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const svc = new GitService({ spawn: f.spawnFn })
+    for (const bad of ['-rf', '', 'a b', '../x', 'a;rm', 42, null, 'x'.repeat(201)]) {
+      const r = await svc.checkoutBranch(tmp, bad)
+      check(`ok is false for ${JSON.stringify(String(bad).slice(0, 12))}`, r.ok, false)
+      check(`no spawn for ${JSON.stringify(String(bad).slice(0, 12))}`, f.calls.filter((c) => c.args[0] === 'checkout').length, 0)
+    }
+  })
+
+  await section('checkoutBranch forwards a valid name as one argv element', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const svc = new GitService({ spawn: f.spawnFn })
+    const r = await svc.checkoutBranch(tmp, 'feature/x_1.2')
+    check('ok', r.ok, true)
+    const co = f.calls.find((c) => c.args[0] === 'checkout')
+    assert(co !== undefined, 'git checkout was spawned', '')
+    check('branch is one argv element, no flags', co.args, ['checkout', 'feature/x_1.2'])
+  })
+
+  await section('checkoutBranch refuses the managed directory', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const svc = new GitService({ spawn: f.spawnFn, getManagedDir: () => tmp })
+    const r = await svc.checkoutBranch(tmp, 'main')
+    check('ok is false', r.ok, false)
+    check('no spawn', f.calls.length, 0)
+  })
+
+  await section('checkout surfaces git refusal verbatim (dirty tree)', async () => {
+    const f = fakeSpawn((cmd, args) => {
+      if (args[0] === '--version') return { code: 0, stdout: 'git version 2.45.0\n' }
+      if (args[0] === 'checkout') return { code: 1, stderr: 'error: Your local changes would be overwritten\n' }
+      return { code: 0, stdout: '' }
+    })
+    const svc = new GitService({ spawn: f.spawnFn })
+    const r = await svc.checkoutBranch(tmp, 'dev')
+    check('ok is false', r.ok, false)
+    check('refusal is verbatim', r.error, 'error: Your local changes would be overwritten')
+  })
+
+  await section('discardFile refuses untracked and clean-staged files', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const svc = new GitService({ spawn: f.spawnFn })
+    for (const [label, st] of [
+      ['untracked', { staged: false, unstaged: false, untracked: true }],
+      ['only staged', { staged: true, unstaged: false, untracked: false }],
+    ]) {
+      const r = await svc.discardFile(tmp, 'src/a.ts', st)
+      check(`ok is false for ${label}`, r.ok, false)
+      check(`no checkout for ${label}`, f.calls.filter((c) => c.args[0] === 'checkout').length, 0)
+    }
+  })
+
+  await section('discardFile restores one tracked file via checkout --', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const svc = new GitService({ spawn: f.spawnFn })
+    const r = await svc.discardFile(tmp, 'src/a.ts', { staged: false, unstaged: true, untracked: false })
+    check('ok', r.ok, true)
+    const co = f.calls.find((c) => c.args[0] === 'checkout')
+    assert(co !== undefined, 'git checkout was spawned', '')
+    check('args are checkout -- <file>', co.args, ['checkout', '--', 'src/a.ts'])
+  })
+
+  await section('discardFile refuses traversal and the managed directory', async () => {
+    const f = fakeSpawn(repoRouter(''))
+    const managed = new GitService({ spawn: f.spawnFn, getManagedDir: () => tmp })
+    const r1 = await managed.discardFile(tmp, 'src/a.ts', { staged: false, unstaged: true, untracked: false })
+    check('managed refusal', r1.ok, false)
+    const plain = new GitService({ spawn: f.spawnFn })
+    const r2 = await plain.discardFile(tmp, '../outside.txt', { staged: false, unstaged: true, untracked: false })
+    check('traversal refusal', r2.ok, false)
+    check('no checkout spawned at all', f.calls.filter((c) => c.args[0] === 'checkout').length, 0)
+  })
+
+  await section('isSafeBranchName rules out option-like and junk names', () => {
+    for (const good of ['main', 'feature/x', 'v1.2.3', 'a_b-c', 'A9']) {
+      check(`accepts ${good}`, isSafeBranchName(good), true)
+    }
+    for (const bad of ['-rf', '', 'a b', '../x', 'a;rm', '*main', 'main~1', null, undefined, 42]) {
+      check(`rejects ${JSON.stringify(String(bad))}`, isSafeBranchName(bad), false)
+    }
   })
 }
 
