@@ -47,6 +47,13 @@
   .spacer { flex: 1; }
   #errors { color: var(--dim); }
   #meta { color: var(--dim); white-space: nowrap; }
+  /* Aggregated agent stats (LLM/tool time, tokens, subagent count). Kept dim
+     like #meta — it is readout, not alarm — and capped so a long line squeezes
+     #detail instead of pushing the buttons off a narrow window. */
+  #stats {
+    color: var(--dim); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 38%;
+  }
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
     border-radius: 3px; padding: 2px 10px; font-size: var(--fs-md); cursor: pointer;
@@ -70,6 +77,8 @@
     <span class="sep"></span>
     <span id="detail"></span>
     <span class="spacer"></span>
+    <span id="stats" title=""></span>
+    <span class="sep" id="stats-sep" style="display:none"></span>
     <span id="errors"></span>
     <span class="sep"></span>
     <span id="meta"></span>
@@ -113,6 +122,20 @@
 
   api.getHealth().then(render).catch(function () {});
   api.onHealth(render);
+
+  // Aggregated agent stats (main + subagents). The line is composed in
+  // stats-model.ts (unit-tested) and arrives already formatted; '' means
+  // "nothing to show" and hides the segment so the bar never shows zeros.
+  var statsEl = document.getElementById('stats');
+  var statsSep = document.getElementById('stats-sep');
+  function renderStats(line) {
+    var text = (typeof line === 'string') ? line : '';
+    statsEl.textContent = text;
+    statsEl.title = text;
+    statsSep.style.display = text ? '' : 'none';
+  }
+  if (api.getStats) api.getStats().then(renderStats).catch(function () {});
+  if (api.onStats) api.onStats(renderStats);
 
   api.getStatusInfo().then(function (info) {
     if (!info) return;

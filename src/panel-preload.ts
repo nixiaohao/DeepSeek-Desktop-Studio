@@ -48,6 +48,10 @@ import { highlightCode, languageForPath } from './highlight.js'
 // rules the main process enforces — one implementation, and a page bug cannot
 // offer an "allow" button spanning two tools.
 import { groupApprovals } from './approval-groups.js'
+// Zero runtime imports as well. The status bar renders the aggregated agent
+// stats through THIS formatter, not its own copy — one implementation, and the
+// unit tests pin exactly what the user reads.
+import { formatStatsSummary } from './stats-model.js'
 
 /** Remove a listener previously added by one of the `on*` helpers. */
 function off(channel: string, cb: (...args: unknown[]) => void): void {
@@ -155,6 +159,20 @@ contextBridge.exposeInMainWorld('dshPanel', {
     total: number
     error?: string
   }> => ipcRenderer.invoke('panel:respond-many', approvalIds, outcome),
+
+  // ── agent stats (dsh mux projections, main + subagents) ──
+
+  /** Latest aggregated stats line ('' when there is nothing to show). */
+  getStats: (): Promise<string> => ipcRenderer.invoke('panel:stats-now'),
+
+  /** Live stats line; pushed only when it actually changed (see ipc-registry). */
+  onStats: (cb: (line: string) => void): void => {
+    ipcRenderer.on('panel:stats', (_e: IpcRendererEvent, line) => cb(line))
+  },
+  offStats: (cb: (...args: unknown[]) => void): void => off('panel:stats', cb),
+
+  /** Format a stats aggregate locally — same implementation the push uses. */
+  formatStats: (s: unknown): string => formatStatsSummary(s as never),
 
   // ── actions ──
 

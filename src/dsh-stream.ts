@@ -340,6 +340,14 @@ export class DshStream {
         cwd: typeof item.cwd === 'string' ? item.cwd : undefined,
         running: item.running === true,
         updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+        // Present ⇔ subagent (upstream derives both from the session header).
+        // Dropped before this edit, which is why the shell could not tell 主
+        // from 子 — the wire carried them all along.
+        parentSessionId:
+          typeof item.parentSessionId === 'string' && item.parentSessionId.length > 0
+            ? item.parentSessionId
+            : undefined,
+        origin: typeof item.origin === 'string' ? item.origin : undefined,
       })
     }
   }

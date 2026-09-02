@@ -24,8 +24,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { subscribeBackend, getBackendLines, getLogDir, getRecentLines, log, subscribeLog } from './logging.js'
 import type { BackendLine } from './logging.js'
-import { buildView, entryFromBackend, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
+import { buildView, entryFromBackend, entryFromAgent, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
 import type { LogEntry } from './log-model.js'
+import { aggregateStats, formatStatsSummary, type StatsSessionRow } from './stats-model.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import {
   savePreferences,
@@ -574,7 +575,33 @@ export function registerIpc(deps: IpcDeps): () => void {
   // ── Logbar: bottom log panel ──
 
   /**
-   * Buffered history from both feeds, merged/sorted/capped by log-model.ts.
+   * Shape the mux activity ring into the logbar's Agent feed.
+   *
+   * The 主/子 prefix is resolved HERE, at read time, from the session table in
+   * the same snapshot — so an entry recorded before the 5s poll first
+   * classified its session still renders with the right role.
+   */
+  const agentFeed = (): LogEntry[] => {
+    const snap = deps.getStream?.()?.snapshot()
+    const activity = snap?.activity ?? []
+    const roleOf = (sessionId: string): string => {
+      const row = snap?.sessions.find((s) => s.sessionId === sessionId)
+      return row?.parentSessionId ? '子' : '主'
+    }
+    return activity.map((a) =>
+      entryFromAgent({
+        ts: a.ts,
+        text:
+          a.kind === 'tool/call'
+            ? `[${roleOf(a.sessionId)}] 调用 ${a.name}`
+            : `[${roleOf(a.sessionId)}] 完成 ${a.name}`,
+      }),
+    )
+  }
+
+  /**
+   * Buffered history from all three feeds, merged/sorted/capped by
+   * log-model.ts.
    *
    * `active` is deliberately null here — the page applies its own chip filter
    * on top, and re-invoking snapshot on every filter toggle would ship the
@@ -582,7 +609,7 @@ export function registerIpc(deps: IpcDeps): () => void {
    * its chips from the same list the main process filters with.
    */
   ipcMain.handle('logs:snapshot', () => ({
-    entries: buildView(getRecentLines(400), getBackendLines(400), null, 400),
+    entries: buildView(getRecentLines(400), getBackendLines(400), agentFeed(), null, 400),
     sources: LOG_SOURCES.map((id) => ({ id, label: LOG_SOURCE_LABELS[id] })),
   }))
 
@@ -870,10 +897,103 @@ export function registerIpc(deps: IpcDeps): () => void {
     if (best) void sidebar.setRoot(best)
   }
 
+  /**
+   * Live tail of the agent activity ring for the logbar.
+   *
+   * onChange carries no payload (it is a revision bump), so the tail is
+   * tracked by count: the ring is append-only between caps, so "longer than
+   * last time" means "push the difference". A cap wrap (length shrank) just
+   * re-pushes everything — rare, and correct.
+   */
+  let lastActivityCount = 0
+  const pushNewActivity = (): void => {
+    const snap = deps.getStream?.()?.snapshot()
+    const activity = snap?.activity ?? []
+    if (activity.length === lastActivityCount) return
+    const fresh =
+      activity.length > lastActivityCount
+        ? activity.slice(activity.length - (activity.length - lastActivityCount))
+        : activity
+    lastActivityCount = activity.length
+
+    const roleOf = (sessionId: string): string => {
+      const row = snap?.sessions.find((s) => s.sessionId === sessionId)
+      return row?.parentSessionId ? '子' : '主'
+    }
+    for (const a of fresh) {
+      pushLogbar(
+        entryFromAgent({
+          ts: a.ts,
+          text:
+            a.kind === 'tool/call'
+              ? `[${roleOf(a.sessionId)}] 调用 ${a.name}`
+              : `[${roleOf(a.sessionId)}] 完成 ${a.name}`,
+        }),
+      )
+    }
+  }
+
+  /**
+   * Aggregated agent stats (main + subagents) for the status bar.
+   *
+   * Recomputed per change and sent only when the rendered line differs: token
+   * projections can tick many times a second during a streamed reply, and the
+   * status bar does not need intermediate values — only stable ones.
+   */
+  let lastStatsLine = ''
+  const statsRows = (): StatsSessionRow[] => {
+    const store = deps.getStream?.()?.store
+    if (!store) return []
+    const snap = store.snapshot()
+    const bySession = new Map<string, { stats?: unknown; usage?: unknown }>()
+    for (const p of store.projectionEntries()) {
+      const row = bySession.get(p.sessionId) ?? {}
+      if (p.key === 'sessionStats') row.stats = p.value
+      else if (p.key === 'tokenUsage') row.usage = p.value
+      bySession.set(p.sessionId, row)
+    }
+    const sessions = snap.sessions.length > 0
+      ? snap.sessions
+      : [...bySession.keys()].map((sessionId) => ({
+        sessionId,
+        running: false,
+        updatedAt: 0,
+      }))
+    return sessions.map((s): StatsSessionRow => {
+      const extra = bySession.get(s.sessionId)
+      return {
+        sessionId: s.sessionId,
+        parentSessionId: (s as { parentSessionId?: string }).parentSessionId,
+        running: s.running,
+        stats: extra?.stats as StatsSessionRow['stats'],
+        usage: extra?.usage as StatsSessionRow['usage'],
+      }
+    })
+  }
+  const pushStatsIfChanged = (): void => {
+    const line = formatStatsSummary(aggregateStats(statsRows()))
+    if (line === lastStatsLine) return
+    lastStatsLine = line
+    const view = getWindowManager()?.statusBar ?? null
+    if (!view || view.webContents.isDestroyed()) return
+    try {
+      view.webContents.send('panel:stats', line)
+    } catch { /* view destroyed mid-send */ }
+  }
+
+  /** Initial fill for the status bar (same shape as the push: one line or ''). */
+  ipcMain.handle('panel:stats-now', () => formatStatsSummary(aggregateStats(statsRows())))
+
   const stream = deps.getStream?.() ?? null
   stream?.setOnChange(() => {
     revision += 1
     broadcast(getWindowManager(), 'panel:changes-rev', revision)
+
+    // Logbar agent tail + status bar stats fold. Both read the same snapshot
+    // the panel revision bump just announced; each keeps its own
+    // dedup/throttle so a burst of frames costs one recompute, not N sends.
+    pushNewActivity()
+    pushStatsIfChanged()
 
     // System notification for each NEW pending approval. dsh already shows its
     // own modal inside the webview; the OS toast makes sure the user notices

@@ -80,6 +80,13 @@ export interface SessionInfo {
   cwd?: string
   running: boolean
   updatedAt: number
+  /**
+   * Present ⇔ this session is a subagent of another one. Comes from
+   * `session.list` (derived upstream from the session header's parent/origin
+   * fields); the stats fold and the activity log use it to tell 主 from 子.
+   */
+  parentSessionId?: string
+  origin?: string
 }
 
 /** The subset of MuxFrame this store understands; unknown types are ignored. */
@@ -88,6 +95,13 @@ export type KnownFrame =
   | { type: 'session/subscribed'; sessionId: string; lastSeq: number }
   | { type: 'approval/requested'; sessionId: string; approvalId: string; toolName: string; callId?: string; reason?: string }
   | { type: 'approval/resolved'; sessionId: string; approvalId: string; outcome: string }
+  /**
+   * Per-session durable projections, broadcast to every mux consumer (upstream
+   * api-proxy wires `sessionProjections.onChanged` → broadcast). Only two keys
+   * are kept — the status bar's stats fold — so a chatty future projection
+   * cannot grow the store.
+   */
+  | { type: 'session/projection'; sessionId: string; key: string; value: unknown; seq: number }
   | { type: 'stream/error'; error: { code?: string; message?: string } }
 
 /** `session/event.data` is a wide passthrough upstream; only these are read. */
@@ -98,10 +112,27 @@ export interface SessionEventLike {
   data?: Record<string, unknown> | null
 }
 
+/**
+ * One thing an agent did, main or subagent — the logbar's Agent feed.
+ *
+ * Deliberately minimal: the role prefix (主/子) is resolved at read time from
+ * the session table, so an entry recorded before the poll classified the
+ * session still renders correctly afterwards.
+ */
+export interface ActivityEntry {
+  sessionId: string
+  kind: 'tool/call' | 'tool/result'
+  /** Tool name for a call; the remembered call's name for a result. */
+  name: string
+  ts: number
+}
+
 export interface StoreSnapshot {
   changes: ChangeEntry[]
   approvals: PendingApproval[]
   sessions: SessionInfo[]
+  /** Agent activity, oldest → newest (insertion order, capped). */
+  activity: ActivityEntry[]
   /** Frames that could not be understood; a rising count means drift, not noise. */
   dropped: number
 }
@@ -110,6 +141,10 @@ export interface StoreSnapshot {
 const CHANGE_LIMIT = 200
 /** Pending calls older than this are dropped — a stalled agent must not pin memory. */
 const PENDING_TTL_MS = 30 * 60 * 1000
+/** How many agent-activity entries the logbar feed keeps. */
+const ACTIVITY_LIMIT = 300
+/** The only projection keys kept; everything else is a no-op. */
+const KEPT_PROJECTION_KEYS = new Set(['sessionStats', 'tokenUsage'])
 
 /**
  * A frame plus the envelope's rpcId. The id rides OUTSIDE the frame (it is the
@@ -252,6 +287,11 @@ export class EventStore {
   private sessions = new Map<string, SessionInfo>()
   /** callId → approvalId, so a resolved approval can close out its call. */
   private callToApproval = new Map<string, string>()
+  /** callId → tool name, so a bare `tool/result` can still say WHAT finished. */
+  private callNames = new Map<string, string>()
+  private activity: ActivityEntry[] = []
+  /** sessionId → (projection key → { value, seq }); higher seq wins. */
+  private projections = new Map<string, Map<string, { value: unknown; seq: number }>>()
   private dropped = 0
   private order: string[] = []
 
@@ -267,6 +307,8 @@ export class EventStore {
       case 'session/subscribed':
         this.touchSession(frame.sessionId)
         return true
+      case 'session/projection':
+        return this.feedProjection(frame)
       case 'stream/error':
         // Not a state change the panel renders, but worth counting: a stream
         // that errors is a stream the UI should be reconnecting.
@@ -275,6 +317,26 @@ export class EventStore {
         this.dropped += 1
         return false
     }
+  }
+
+  private feedProjection(
+    frame: Extract<KnownFrame, { type: 'session/projection' }>,
+  ): boolean {
+    if (typeof frame.sessionId !== 'string' || frame.sessionId.length === 0) return false
+    if (!KEPT_PROJECTION_KEYS.has(frame.key)) return false
+    if (typeof frame.seq !== 'number' || !Number.isFinite(frame.seq)) return false
+
+    let byKey = this.projections.get(frame.sessionId)
+    if (byKey === undefined) {
+      byKey = new Map()
+      this.projections.set(frame.sessionId, byKey)
+    }
+    const existing = byKey.get(frame.key)
+    // Higher-seq-wins, mirroring upstream's reconnect rule: a replayed older
+    // value must not roll the fold backwards.
+    if (existing && existing.seq > frame.seq) return false
+    byKey.set(frame.key, { value: frame.value, seq: frame.seq })
+    return true
   }
 
   private feedEvent(
@@ -287,6 +349,28 @@ export class EventStore {
     const data = (event.data ?? {}) as Record<string, unknown>
     const callId = str(data.callId)
     if (!callId) return false
+
+    // Agent activity ring — recorded for EVERY tool call/result, not just the
+    // file-mutating ones the change list tracks. This is the logbar's "what
+    // are the agents doing" feed; subagents' calls land here exactly like the
+    // main agent's, because the mux carries every session's events.
+    if (event.type === 'tool/call') {
+      const toolName = str(data.name) ?? 'tool'
+      this.rememberCallName(callId, toolName)
+      this.pushActivity({
+        sessionId: frame.sessionId,
+        kind: 'tool/call',
+        name: toolName,
+        ts: typeof event.time === 'number' ? event.time : Date.now(),
+      })
+    } else if (event.type === 'tool/result') {
+      this.pushActivity({
+        sessionId: frame.sessionId,
+        kind: 'tool/result',
+        name: this.callNames.get(callId) ?? '工具',
+        ts: typeof event.time === 'number' ? event.time : Date.now(),
+      })
+    }
 
     if (event.type === 'tool/call') {
       const toolName = str(data.name) ?? 'tool'
@@ -363,6 +447,34 @@ export class EventStore {
     return true
   }
 
+  private pushActivity(entry: ActivityEntry): void {
+    this.activity.push(entry)
+    // Insertion order is oldest-first; trim from the front once over the cap.
+    while (this.activity.length > ACTIVITY_LIMIT) this.activity.shift()
+  }
+
+  /** Remember a call's tool name, bounded the same way as the activity ring. */
+  private rememberCallName(callId: string, name: string): void {
+    this.callNames.set(callId, name)
+    while (this.callNames.size > ACTIVITY_LIMIT) {
+      const oldest = this.callNames.keys().next().value
+      if (oldest === undefined) break
+      this.callNames.delete(oldest)
+    }
+  }
+
+  /**
+   * Kept projection values, flattened for the stats fold. Order is
+   * session-insertion; the consumer re-groups by sessionId as it needs.
+   */
+  projectionEntries(): { sessionId: string; key: string; value: unknown }[] {
+    const out: { sessionId: string; key: string; value: unknown }[] = []
+    for (const [sessionId, byKey] of this.projections) {
+      for (const [key, { value }] of byKey) out.push({ sessionId, key, value })
+    }
+    return out
+  }
+
   private upsertChange(entry: ChangeEntry): void {
     if (!this.changes.has(entry.callId)) {
       this.order.push(entry.callId)
@@ -434,6 +546,7 @@ export class EventStore {
       changes,
       approvals: [...this.approvals.values()].sort((a, b) => a.ts - b.ts),
       sessions,
+      activity: [...this.activity],
       dropped: this.dropped,
     }
   }
@@ -444,6 +557,9 @@ export class EventStore {
     this.approvals.clear()
     this.sessions.clear()
     this.callToApproval.clear()
+    this.callNames.clear()
+    this.activity = []
+    this.projections.clear()
     this.order = []
     this.dropped = 0
   }

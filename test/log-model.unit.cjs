@@ -10,6 +10,7 @@ const {
   LOG_SOURCE_LABELS,
   parseShellLine,
   entryFromBackend,
+  entryFromAgent,
   buildView,
 } = require(path.join(__dirname, '..', 'lib-new', 'log-model.js'))
 
@@ -37,7 +38,7 @@ test('a valid shell line parses with source, ts and text', () => {
   assert.deepStrictEqual(e, { source: 'launcher', ts: TS, stream: 'out', text: 'update check done' })
 })
 
-test('all four sources are recognised', () => {
+test('shell-line sources are recognised (agent is never parsed from text)', () => {
   for (const s of ['launcher', 'wizard', 'backend', 'fatal']) {
     assert.strictEqual(parseShellLine(shellLine(s, 'x'))?.source, s)
   }
@@ -81,6 +82,13 @@ test('backend stdout keeps stream out', () => {
   assert.strictEqual(entryFromBackend({ ts: 1, stream: 'out', text: 'ok' }).stream, 'out')
 })
 
+// ── entryFromAgent ──
+
+test('agent records pass through with source agent and stream out', () => {
+  const e = entryFromAgent({ ts: 99, text: '[主] 调用 Write' })
+  assert.deepStrictEqual(e, { source: 'agent', ts: 99, stream: 'out', text: '[主] 调用 Write' })
+})
+
 // ── labels ──
 
 test('every source has a non-empty Chinese label', () => {
@@ -93,7 +101,7 @@ test('every source has a non-empty Chinese label', () => {
 // ── buildView ──
 
 test('empty inputs produce an empty view', () => {
-  assert.deepStrictEqual(buildView([], [], null), [])
+  assert.deepStrictEqual(buildView([], [], [], null), [])
 })
 
 test('both feeds merge and sort oldest first', () => {
@@ -101,7 +109,7 @@ test('both feeds merge and sort oldest first', () => {
   const earlierIso = '2026-09-02T03:00:00.000Z'
   const earlier = `[launcher] [${earlierIso}] earlier`
   const backendMid = [{ ts: Date.parse('2026-09-02T03:30:00.000Z'), stream: 'out', text: 'mid' }]
-  const view = buildView([later, earlier], backendMid, null)
+  const view = buildView([later, earlier], backendMid, [], null)
   assert.deepStrictEqual(
     view.map((e) => e.text),
     ['earlier', 'mid', 'later'],
@@ -112,6 +120,7 @@ test('equal timestamps keep arrival order (stable sort)', () => {
   const view = buildView(
     [shellLine('launcher', 'first'), shellLine('wizard', 'second')],
     [{ ts: TS, stream: 'out', text: 'third' }],
+    [],
     null,
   )
   assert.deepStrictEqual(
@@ -124,6 +133,7 @@ test('active filter keeps only selected sources', () => {
   const view = buildView(
     [shellLine('launcher', 'a'), shellLine('fatal', 'b')],
     [{ ts: TS, stream: 'out', text: 'c' }],
+    [{ ts: TS, text: 'ag' }],
     ['fatal'],
   )
   assert.deepStrictEqual(
@@ -136,9 +146,10 @@ test('active=null shows everything', () => {
   const view = buildView(
     [shellLine('launcher', 'a'), shellLine('fatal', 'b')],
     [{ ts: TS, stream: 'out', text: 'c' }],
+    [{ ts: TS, text: 'ag' }],
     null,
   )
-  assert.strictEqual(view.length, 3)
+  assert.strictEqual(view.length, 4)
 })
 
 test('cap keeps the newest entries AFTER filtering', () => {
@@ -152,7 +163,7 @@ test('cap keeps the newest entries AFTER filtering', () => {
     `[launcher] [2026-09-02T03:00:00.000Z] l3`,
     `[fatal] [2026-09-02T03:01:00.000Z] f3`,
   ]
-  const view = buildView(shell, [], ['fatal'], 4)
+  const view = buildView(shell, [], [], ['fatal'], 4)
   assert.deepStrictEqual(
     view.map((e) => e.text),
     ['f1', 'f2', 'f3'],
@@ -161,7 +172,7 @@ test('cap keeps the newest entries AFTER filtering', () => {
 
 test('cap trims the OLDEST entries when everything matches', () => {
   const shell = [1, 2, 3, 4, 5].map((n) => shellLine('launcher', `m${n}`))
-  const view = buildView(shell, [], null, 2)
+  const view = buildView(shell, [], [], null, 2)
   assert.deepStrictEqual(
     view.map((e) => e.text),
     ['m4', 'm5'],
@@ -169,11 +180,29 @@ test('cap trims the OLDEST entries when everything matches', () => {
 })
 
 test('malformed shell lines are skipped during the merge', () => {
-  const view = buildView(['junk', shellLine('wizard', 'good'), null, 5], [], null)
+  const view = buildView(['junk', shellLine('wizard', 'good'), null, 5], [], [], null)
   assert.deepStrictEqual(
     view.map((e) => e.text),
     ['good'],
   )
+})
+
+test('agent feed merges into the timeline and follows the filter', () => {
+  const agent = [
+    { ts: Date.parse('2026-09-02T05:00:00.000Z'), text: '[主] 调用 Bash' },
+    { ts: Date.parse('2026-09-02T05:01:00.000Z'), text: '[子] 调用 Read' },
+  ]
+  const all = buildView([], [], agent, null)
+  assert.deepStrictEqual(all.map((e) => e.text), ['[主] 调用 Bash', '[子] 调用 Read'])
+  assert.ok(all.every((e) => e.source === 'agent'))
+  const onlyLauncher = buildView([shellLine('launcher', 'l')], [], agent, ['launcher'])
+  assert.deepStrictEqual(onlyLauncher.map((e) => e.text), ['l'])
+})
+
+test('agent entries are capped together with the other feeds', () => {
+  const agent = [1, 2, 3].map((n) => ({ ts: n, text: `a${n}` }))
+  const view = buildView([], [], agent, ['agent'], 2)
+  assert.deepStrictEqual(view.map((e) => e.text), ['a2', 'a3'])
 })
 
 console.log(`\nlog-model: ${pass} passed, ${fail} failed`)

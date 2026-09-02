@@ -232,6 +232,7 @@ const MODULES = [
   'settings-preload.js',
   'settings-window.js',
   'dsh-input.js',
+  'stats-model.js',
   'layout-geometry.js',
   'ui-scale.js',
   'external-editor.js',
@@ -416,6 +417,14 @@ function requiresOf(rel) {
   assert(deps.length === 0, 'log-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
 {
+  // The status bar's stats fold. It decides what the user reads as "what is
+  // the agent doing", so it must load and run in plain node like the other
+  // pure models — a runtime import here would put a broken Electron module
+  // between the user and the numbers.
+  const deps = requiresOf('stats-model.js')
+  assert(deps.length === 0, 'stats-model.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
+{
   // The three sandboxed bridges must require NOTHING but 'electron'.
   //
   // A local require inside a sandboxed preload throws before
@@ -457,9 +466,14 @@ const EXPECTED = [
   ['layout-geometry.js', 'LOGBAR_MAX_HEIGHT'],
   ['log-model.js', 'parseShellLine'],
   ['log-model.js', 'entryFromBackend'],
+  ['log-model.js', 'entryFromAgent'],
   ['log-model.js', 'buildView'],
   ['log-model.js', 'LOG_SOURCES'],
   ['log-model.js', 'LOG_SOURCE_LABELS'],
+  ['stats-model.js', 'aggregateStats'],
+  ['stats-model.js', 'formatDuration'],
+  ['stats-model.js', 'formatTokens'],
+  ['stats-model.js', 'formatStatsSummary'],
   ['ipc-registry.js', 'registerIpc'],
   ['external-editor.js', 'openInEditor'],
   ['external-editor.js', 'EDITOR_PRESETS'],
@@ -1038,7 +1052,7 @@ function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 165
+  const MIN_ASSERTIONS = 178
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,

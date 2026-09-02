@@ -7,10 +7,12 @@
  * never be the thing that breaks. All it does is shape data; the feeds live in
  * logging.ts and the push/pull wiring lives in ipc-registry.ts.
  *
- * There are two raw feeds with different shapes:
+ * There are three raw feeds with different shapes:
  *   - the shell ring (logging.getRecentLines): strings formatted
  *     `[<name>] [<ISO date>] <message>` — launcher / wizard / fatal
  *   - the backend ring (logging.getBackendLines): { ts, stream, text }
+ *   - the agent activity ring (event-store, dsh mux stream): already-shaped
+ *     entries for what the agents (main AND subagents) are doing
  *
  * The MAIN PROCESS merges them here (one implementation, unit-tested) and
  * hands the page an already-structured entry list. The page then only filters
@@ -18,10 +20,10 @@
  * logging.ts cannot silently break the logbar's view.
  */
 
-/** The four log streams the shell keeps (see logging.ts). */
-export type LogSource = 'launcher' | 'wizard' | 'backend' | 'fatal'
+/** The five log streams the shell keeps (see logging.ts / event-store.ts). */
+export type LogSource = 'launcher' | 'wizard' | 'backend' | 'fatal' | 'agent'
 
-export const LOG_SOURCES: readonly LogSource[] = ['launcher', 'wizard', 'backend', 'fatal']
+export const LOG_SOURCES: readonly LogSource[] = ['launcher', 'wizard', 'backend', 'fatal', 'agent']
 
 /** Chinese labels for the filter chips, keyed by source id. */
 export const LOG_SOURCE_LABELS: Record<LogSource, string> = {
@@ -29,6 +31,7 @@ export const LOG_SOURCE_LABELS: Record<LogSource, string> = {
   wizard: '向导',
   backend: '后端',
   fatal: '致命',
+  agent: 'Agent',
 }
 
 /** One renderable log line. */
@@ -75,7 +78,19 @@ export function entryFromBackend(line: { ts: number; stream: 'out' | 'err'; text
 }
 
 /**
- * Merge both feeds into the ordered, filtered, capped list the logbar draws.
+ * Adapt one agent-activity record to the shared entry shape.
+ *
+ * `text` arrives already composed by the caller (role prefix + action), because
+ * the 主/子 classification needs the session table, which is this module's
+ * input here — not something it re-derives.
+ */
+export function entryFromAgent(line: { ts: number; text: string }): LogEntry {
+  return { source: 'agent', ts: line.ts, stream: 'out', text: line.text }
+}
+
+/**
+ * Merge all three feeds into the ordered, filtered, capped list the logbar
+ * draws.
  *
  * - Sorted oldest → newest. `Array#sort` is stable in every runtime Electron
  *   ships, so lines with identical timestamps keep their arrival order.
@@ -89,6 +104,7 @@ export function entryFromBackend(line: { ts: number; stream: 'out' | 'err'; text
 export function buildView(
   shell: readonly unknown[],
   backend: readonly { ts: number; stream: 'out' | 'err'; text: string }[],
+  agent: readonly { ts: number; text: string }[],
   active: readonly LogSource[] | null,
   limit = 400,
 ): LogEntry[] {
@@ -98,6 +114,7 @@ export function buildView(
     if (entry) entries.push(entry)
   }
   for (const line of backend) entries.push(entryFromBackend(line))
+  for (const line of agent) entries.push(entryFromAgent(line))
   entries.sort((a, b) => a.ts - b.ts)
   const filtered = active ? entries.filter((e) => active.includes(e.source)) : entries
   return filtered.length > limit ? filtered.slice(filtered.length - limit) : filtered

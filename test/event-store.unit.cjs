@@ -319,8 +319,11 @@ check('noteSessionRunning creates a session on demand', () => {
 
 check('unknown frame types are counted, not fatal', () => {
   const s = new EventStore()
-  s.feed({ type: 'session/projection', sessionId: 's', key: 'k', value: 1, seq: 1 })
+  // `session/projection` USED to be the example here — it is an understood,
+  // kept frame now (the status bar's stats fold eats it). These two are still
+  // frames this store has no use for.
   s.feed({ type: 'session/queue', sessionId: 's', items: [] })
+  s.feed({ type: 'session/jobs', sessionId: 's', jobs: [] })
   assert.strictEqual(s.snapshot().dropped, 2, 'upstream adds frames freely; ignoring them is correct')
 })
 
@@ -450,6 +453,87 @@ check('a realistic approval flow survives the whole pipeline', () => {
     s.getApproval('ap-7').rpcId, 'r2',
     'respond is a client-response and must echo the frame\'s envelope id',
   )
+})
+
+// ── session/projection (status bar stats fold) ──
+
+check('kept projection keys are stored and flattened by projectionEntries', () => {
+  const s = new EventStore()
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: { llmMs: 1000 }, seq: 3 })
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'tokenUsage', value: { outputTokens: 5 }, seq: 2 })
+  // An unkept key must not be stored — a chatty future projection cannot grow
+  // the store.
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'contextPressure', value: {}, seq: 9 })
+  const flat = s.projectionEntries()
+  assert.strictEqual(flat.length, 2)
+  assert.ok(flat.some((p) => p.key === 'sessionStats' && p.value.llmMs === 1000))
+  assert.ok(flat.some((p) => p.key === 'tokenUsage' && p.value.outputTokens === 5))
+})
+
+check('a lower-seq projection replay never rolls the fold backwards', () => {
+  const s = new EventStore()
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: { llmMs: 2000 }, seq: 7 })
+  assert.strictEqual(s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: { llmMs: 1 }, seq: 6 }), false)
+  assert.strictEqual(s.projectionEntries()[0].value.llmMs, 2000)
+  // Equal seq replaces (idempotent re-delivery), lower does not.
+  assert.strictEqual(s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: { llmMs: 2000 }, seq: 7 }), true)
+})
+
+check('projection frames with a bad session id or seq are rejected', () => {
+  const s = new EventStore()
+  assert.strictEqual(s.feed({ type: 'session/projection', sessionId: '', key: 'sessionStats', value: {}, seq: 1 }), false)
+  assert.strictEqual(s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: {}, seq: Number.NaN }), false)
+  assert.strictEqual(s.projectionEntries().length, 0)
+})
+
+// ── agent activity ring (logbar Agent feed) ──
+
+const toolCall = (sessionId, callId, name, time) => ({
+  type: 'session/event',
+  sessionId,
+  event: { type: 'tool/call', time, data: { callId, name, arguments: '{}' } },
+})
+const toolResult = (sessionId, callId, time) => ({
+  type: 'session/event',
+  sessionId,
+  event: { type: 'tool/result', time, data: { callId } },
+})
+
+check('every tool call/result lands in the activity ring, subagents included', () => {
+  const s = new EventStore()
+  s.feed(toolCall('main', 'c1', 'Write', 1000))
+  s.feed(toolCall('sub', 'c2', 'Read', 2000)) // no diff view — still an activity row
+  s.feed(toolResult('sub', 'c2', 3000))
+  const a = s.snapshot().activity
+  assert.deepStrictEqual(
+    a.map((e) => [e.sessionId, e.kind, e.name]),
+    [['main', 'tool/call', 'Write'], ['sub', 'tool/call', 'Read'], ['sub', 'tool/result', 'Read']],
+    'a bare result remembers its call tool name; non-file tools are kept',
+  )
+})
+
+check('the activity ring caps at the oldest-evicted-first limit', () => {
+  const s = new EventStore()
+  for (let i = 0; i < 305; i += 1) s.feed(toolCall('m', `c${i}`, 'Bash', i))
+  const a = s.snapshot().activity
+  assert.strictEqual(a.length, 300)
+  assert.strictEqual(a[0].name, 'Bash')
+  assert.strictEqual(a[0].ts, 5, 'oldest evicted: first kept is call #5')
+})
+
+check('reset clears activity, projections and call names', () => {
+  const s = new EventStore()
+  s.feed(toolCall('m', 'c1', 'Write', 1))
+  s.feed({ type: 'session/projection', sessionId: 'm', key: 'sessionStats', value: {}, seq: 1 })
+  s.reset()
+  assert.strictEqual(s.snapshot().activity.length, 0)
+  assert.strictEqual(s.projectionEntries().length, 0)
+})
+
+check('noteSessionInfo keeps parentSessionId for the 主/子 classification', () => {
+  const s = new EventStore()
+  s.noteSessionInfo({ sessionId: 'sub', running: true, updatedAt: 1, parentSessionId: 'main' })
+  assert.strictEqual(s.snapshot().sessions[0].parentSessionId, 'main')
 })
 
 console.log(`\nevent-store: ${pass} passed, ${fail} failed`)
