@@ -106,6 +106,17 @@
   #diff .del { color: var(--err); }
   #diff .hunk { color: var(--accent); }
 
+  /* ── syntax tokens ──────────────────────────────────────────────────
+     Classes emitted by src/highlight.ts (see panel.html for why classes and
+     not inline styles). Coloured tokens override the .add/.del line colour,
+     which is the point: on a big diff, "which word is a string" carries more
+     than "this whole line is green". */
+  .tok-k { color: #569cd6; }
+  .tok-s { color: #ce9178; }
+  .tok-c { color: #6a9955; }
+  .tok-n { color: #b5cea8; }
+  .tok-a { color: #9cdcfe; }
+
   /* ── tree ── */
   #treeWrap { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
   #tree { flex: 1; overflow: auto; padding: 3px 0; }
@@ -362,6 +373,20 @@
 
   // ── diff ─────────────────────────────────────────────────────────────
 
+  /**
+   * Highlight a fragment, degrading to escaped plain text.
+   *
+   * Same reasoning as panel.html's hl(): `api` comes from the preload, and a
+   * throw inside a render loop shows the user an empty diff with no clue.
+   */
+  function hl(code, filePath) {
+    try {
+      var out = api.highlight(code, filePath);
+      if (typeof out === 'string' && out) return out;
+    } catch (e) { /* bridge missing or older than this page */ }
+    return esc(code);
+  }
+
   function renderDiff(text) {
     if (!text) {
       diffEl.innerHTML = '<span style="opacity:.7">没有差异（可能是新文件，或改动已暂存）。</span>';
@@ -369,14 +394,37 @@
     }
     var lines = text.split('\n');
     var html = '';
+    var run = [];
+    var runCls = null;
+
+    /**
+     * Consecutive lines sharing one class are highlighted as ONE blob.
+     *
+     * Two reasons, both about correctness rather than speed:
+     *  - a block comment or triple-quoted string that spans an added run is
+     *    then coloured as a whole instead of being cut at every newline;
+     *  - the newlines live INSIDE the .add/.del span, and in a <pre> they still
+     *    break the line, so one span gives per-line colour without one span per
+     *    line — and without splitting highlighted HTML back apart at newlines,
+     *    which would mean re-opening every span the break cut through.
+     */
+    function flushRun() {
+      if (!run.length) return;
+      html += (runCls ? '<span class="' + runCls + '">' + hl(run.join('\n'), selected) + '</span>'
+        : hl(run.join('\n'), selected)) + '\n';
+      run = [];
+    }
+
     for (var i = 0; i < lines.length; i++) {
-      var l = esc(lines[i]);
+      var l = lines[i];
       var cls = '';
       if (l.charAt(0) === '+' && l.indexOf('+++') !== 0) cls = 'add';
       else if (l.charAt(0) === '-' && l.indexOf('---') !== 0) cls = 'del';
       else if (l.indexOf('@@') === 0) cls = 'hunk';
-      html += (cls ? '<span class="' + cls + '">' + l + '</span>' : l) + '\n';
+      if (cls !== runCls) { flushRun(); runCls = cls; }
+      run.push(l);
     }
+    flushRun();
     diffEl.innerHTML = html;
   }
 

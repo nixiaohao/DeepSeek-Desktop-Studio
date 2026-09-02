@@ -40,6 +40,10 @@ import { findPaths } from './path-links.js'
 // PHASE_LABEL is plain data and health-monitor.ts carries no runtime imports
 // (its only import is `import type`), so this costs nothing at load time.
 import { PHASE_LABEL, type HealthPhase } from './health-monitor.js'
+// Zero runtime imports, like path-links — so the page can colour a code preview
+// without shipping a grammar to the renderer or paying an IPC round-trip per
+// card. Runs in the isolated world with node access (see `sandbox: false`).
+import { highlightCode, languageForPath } from './highlight.js'
 
 /** Remove a listener previously added by one of the `on*` helpers. */
 function off(channel: string, cb: (...args: unknown[]) => void): void {
@@ -143,4 +147,19 @@ contextBridge.exposeInMainWorld('dshPanel', {
   /** Heuristic file-path detection, for clickable links in the output. */
   findPaths: (text: string): { text: string; index: number; length: number }[] =>
     findPaths(text),
+
+  /**
+   * Syntax-highlight a code preview for `filePath`, as an HTML fragment.
+   *
+   * Takes the PATH rather than a language id: choosing the language is an
+   * implementation detail the page has no business knowing, and the path is
+   * what a FileDiff actually carries.
+   *
+   * Returns escaped HTML — every token is escaped as it is emitted, so the
+   * result is safe to assign to innerHTML even though the source is arbitrary
+   * agent output. It emits `class="tok-*"` rather than inline styles, because
+   * the pages run under a CSP that only permits their own <style> block.
+   */
+  highlight: (code: string, filePath: string): string =>
+    highlightCode(code, languageForPath(filePath)),
 })

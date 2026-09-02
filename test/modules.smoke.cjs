@@ -214,6 +214,7 @@ const MODULES = [
   'redact.js',
   'path-links.js',
   'health-monitor.js',
+  'highlight.js',
   'external-editor.js',
   'preferences.js',
   'logging.js',
@@ -267,6 +268,14 @@ function requiresOf(rel) {
   const deps = requiresOf('redact.js')
   assert(deps.length === 0, 'redact.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
+{
+  // The whole point of highlight.ts is that it adds NO dependency to the
+  // asar — pulling in shiki/prism would violate the spec's zero-new-deps rule,
+  // and a stray `import` (as opposed to `import type`) would break the unit
+  // test that drives it from plain node.
+  const deps = requiresOf('highlight.js')
+  assert(deps.length === 0, 'highlight.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
 
 // ── 3. Exported symbols other code depends on ──
 
@@ -292,6 +301,10 @@ const EXPECTED = [
   ['logging.js', 'getBackendLines'],
   ['preferences.js', 'loadPanelPrefs'],
   ['preferences.js', 'saveExternalEditor'],
+  ['highlight.js', 'highlightCode'],
+  ['highlight.js', 'languageForPath'],
+  ['highlight.js', 'escapeHtml'],
+  ['highlight.js', 'HIGHLIGHT_MAX_CHARS'],
   ['menu.js', 'setupMenu'],
 ]
 

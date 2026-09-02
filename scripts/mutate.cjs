@@ -2,9 +2,20 @@
  * Mutation helper — part of the "prove the test can actually fail" ritual.
  *
  * Usage:
+ *   cp lib-new/<file> /tmp/orig.js             # ONCE, before the first mutation
  *   node scripts/mutate.cjs <file-under-lib-new> "<find>" "<replace>"
  *   npm test            # expect FAILURES
- *   git checkout -- <the src file> && npx tsc   # restore
+ *   cp /tmp/orig.js lib-new/<file>             # restore
+ *
+ * ⚠️ RESTORE BY COPYING FROM A BACKUP. NEVER `git checkout -- <file>`: that
+ * restores from the INDEX, not the working tree, so uncommitted work is
+ * silently destroyed with exit 0 (this cost a 240-line reconstruction on
+ * 2026-09-02). If the backup is gone, `lib-new/*.js` is the compiled evidence
+ * to reconstruct the source from — and `npx tsc` proves the reconstruction.
+ *
+ * ⚠️ Pass Windows-style paths (D:/…). node.exe cannot resolve Git Bash's
+ * /d/… form, and the only symptom is "MUTATION PATTERN NOT FOUND" on every
+ * case — which reads as "the tests caught nothing" when really nothing ran.
  *
  * It exits 2 when the find string is absent. That is the entire point: doing
  * this with `sed` silently matched nothing THREE times, because tsc puts a

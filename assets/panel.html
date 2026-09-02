@@ -116,6 +116,18 @@
   .chg .detail .note { color: #5d6377; font-size: 10px; }
   .chg .detail .tools { display: flex; gap: 6px; margin-top: 4px; }
 
+  /* ── syntax tokens ──────────────────────────────────────────────────
+     Emitted as CLASSES by src/highlight.ts, never as inline styles: the CSP
+     above allows the page's own <style> but is one edit away from tightening,
+     and an inline style would then silently lose all colouring.
+     Colours are deliberately few — five kinds, no per-language themes —
+     because this is a skim surface, not an editor. */
+  .tok-k { color: #569cd6; } /* keyword */
+  .tok-s { color: #ce9178; } /* string  */
+  .tok-c { color: #6a9955; } /* comment */
+  .tok-n { color: #b5cea8; } /* number  */
+  .tok-a { color: #9cdcfe; } /* tag / attribute / key */
+
   #splitter {
     flex: none; height: 5px; cursor: ns-resize; background: var(--bg-2);
     border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
@@ -398,6 +410,28 @@
     return n;
   }
 
+  /**
+   * Syntax-highlight a fragment, degrading to escaped plain text.
+   *
+   * try/catch is not defensive decoration: `api` is installed by the preload,
+   * which is versioned with the app and not with this HTML, and this runs
+   * inside a render loop — a throw here leaves the user looking at a half-built
+   * panel with no way to tell what happened.
+   *
+   * The fallback escapes through a detached node rather than a hand-rolled
+   * .replace() chain: there is exactly one HTML escaper worth having and it
+   * lives in src/highlight.ts.
+   */
+  function hl(code, filePath) {
+    try {
+      var out = api.highlight(code, filePath);
+      if (typeof out === 'string' && out) return out;
+    } catch (e) { /* bridge missing or older than this page */ }
+    var n = document.createElement('div');
+    n.textContent = code;
+    return n.innerHTML;
+  }
+
   /** Build one change card. Paths are real, so they stay clickable. */
   function changeNode(c) {
     var wrap = el('div', 'chg ' + c.status);
@@ -443,7 +477,12 @@
         : String(diff.newText || '');
       var lines = body.split('\n');
       var shown = lines.slice(0, PREVIEW_LINES).join('\n');
-      var pre = el('pre', '', shown);
+      // innerHTML, not textContent — hl() returns an escaped HTML fragment, and
+      // the CSP's script-src stops anything executable even if it were not.
+      // Highlighted as ONE blob rather than line by line, so a block comment or
+      // a triple-quoted string that spans the preview is coloured as a whole.
+      var pre = el('pre');
+      pre.innerHTML = hl(shown, diff.path);
       detail.appendChild(pre);
       if (lines.length > PREVIEW_LINES) {
         detail.appendChild(el('div', 'note',

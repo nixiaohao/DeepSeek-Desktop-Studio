@@ -16,6 +16,9 @@
  * in a renderer and is re-validated in ipc-registry.ts.
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+// Zero runtime imports (see highlight.ts) — the diff viewer colours its own
+// hunks locally instead of round-tripping every line through IPC.
+import { highlightCode, languageForPath } from './highlight.js'
 
 /** Remove a listener previously added by one of the `on*` helpers. */
 function off(channel: string, cb: (...args: unknown[]) => void): void {
@@ -105,4 +108,17 @@ contextBridge.exposeInMainWorld('dshSidebar', {
 
   /** True when this page is running inside Electron with the bridge installed. */
   ready: (): boolean => true,
+
+  // ── helpers ──
+
+  /**
+   * Syntax-highlight a code fragment for `filePath` (see panel-preload.ts).
+   *
+   * The diff viewer shows a UNIFIED diff, so this is not line-perfect — but the
+   * per-line `+`/`-`/space prefix is one character and every family's plain-text
+   * fallback path swallows it harmlessly, which is far better than a wall of
+   * monochrome green and red.
+   */
+  highlight: (code: string, filePath: string): string =>
+    highlightCode(code, languageForPath(filePath)),
 })
