@@ -494,6 +494,23 @@ for (const asset of RESIZER_PAGES) {
   )
 }
 
+// ── 3b2. Workspace switcher wiring (sidebar) ──────────────────────────
+
+/**
+ * `suggestions` (the dsh session directories) ride every snapshot, but data
+ * a page never renders is dead weight — the P3 workspace switcher is the
+ * reason they are shipped. If a refactor drops the wiring, this fails instead
+ * of the feature silently disappearing.
+ */
+{
+  const html = read(path.join('assets', 'sidebar.html'))
+  assert(
+    /snap\.suggestions/.test(html) && /openSuggMenu/.test(html),
+    'sidebar.html wires the workspace switcher (suggestions → openSuggMenu)',
+    'suggestions are shipped in the snapshot but never offered — the P3 switcher disappeared'
+  )
+}
+
 // ── 3c. Panel type scale ──
 
 /**

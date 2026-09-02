@@ -72,6 +72,9 @@
     color: var(--fg); font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; flex: 1; min-width: 0;
   }
+  /* Switchable state: the root name offers the dsh session directories. */
+  header .title.pick { cursor: pointer; }
+  header .title.pick::after { content: ' ▾'; color: var(--fg-dim); font-weight: 400; }
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
     border-radius: 3px; padding: 2px 8px; cursor: pointer; flex: none;
@@ -557,6 +560,14 @@
     lastSnap = snap;
     rootNameEl.textContent = snap.root ? shortName(snap.root) : '未选择目录';
     rootNameEl.title = snap.root || '';
+    // The root name doubles as the workspace switcher: when dsh is working
+    // in other directories, clicking it offers them (P3 工作区切换器).
+    // No new IPC — setRoot already exists and suggestions ride the snapshot.
+    var sugg = (snap.suggestions || []).filter(function (d) { return d && d !== snap.root; });
+    rootNameEl.className = sugg.length ? 'pick' : '';
+    rootNameEl.title = sugg.length
+      ? (snap.root || '') + '\n点击切换到 dsh 会话目录（' + sugg.length + '）'
+      : (snap.root || '');
     renderGit(snap.git);
     renderChanged(snap.git);
     renderTree(snap.rows);
@@ -602,6 +613,31 @@
     menuEl.style.top = Math.min(y, window.innerHeight - h - 4) + 'px';
   }
 
+  /**
+   * Workspace switcher under the root name (P3).
+   *
+   * Lists the directories dsh's sessions are working in (already carried by
+   * the snapshot as `suggestions`); picking one re-roots the sidebar. Loaded
+   * from lastSnap when opened — it refreshes on every repaint anyway.
+   */
+  function openSuggMenu(x, y) {
+    var list = (lastSnap && lastSnap.suggestions || []).filter(function (d) {
+      return d && d !== lastSnap.root;
+    });
+    if (!list.length) return;
+    menuMode = 'sugg';
+    var html = '';
+    for (var i = 0; i < list.length; i++) {
+      html += '<div data-a="root" data-b="' + esc(list[i]) + '" title="' + esc(list[i]) + '">' +
+        esc(shortName(list[i])) + '</div>';
+    }
+    menuEl.innerHTML = html;
+    menuEl.style.display = 'block';
+    var w = menuEl.offsetWidth, h = menuEl.offsetHeight;
+    menuEl.style.left = Math.min(x, window.innerWidth - w - 4) + 'px';
+    menuEl.style.top = Math.min(y, window.innerHeight - h - 4) + 'px';
+  }
+
   function closeMenu() {
     menuEl.style.display = 'none';
     menuTarget = '';
@@ -637,6 +673,19 @@
 
   menuEl.addEventListener('click', function (e) {
     var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
+    // Workspace switcher: rows carry the directory on data-b.
+    if (menuMode === 'sugg') {
+      closeMenu();
+      var d = e.target && e.target.getAttribute && e.target.getAttribute('data-b');
+      if (a === 'root' && d) {
+        api.setRoot(d).then(function (r) {
+          if (r && r.ok) toast('已切换到 ' + shortName(d));
+          else report(r);
+          repaint();
+        }).catch(function () { toast('切换失败', true); });
+      }
+      return;
+    }
     // Branch mode carries the branch name on the row, not in menuTarget.
     if (menuMode === 'branch') {
       closeMenu();
@@ -753,6 +802,13 @@
   $('branch').addEventListener('click', function (e) {
     if (gitWriteLocked) return;
     openBranchMenu(e.clientX, e.clientY + 6);
+  });
+
+  // Workspace switcher from the root name (only when suggestions exist —
+  // the .pick class is the affordance, so a click without them is a no-op).
+  rootNameEl.addEventListener('click', function (e) {
+    if (rootNameEl.className.indexOf('pick') < 0) return;
+    openSuggMenu(e.clientX, e.clientY + 6);
   });
 
   $('btn-commit').addEventListener('click', function () {
