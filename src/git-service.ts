@@ -1,12 +1,18 @@
 /**
  * git-service.ts — the ONLY place that shells out to git.
  *
- * Deliberately read-only in this version. The directory dsh works in is the
+ * Reads are unconditional; WRITES (stage / unstage / commit) exist but are
+ * guarded by three checks, all enforced here (see the write section below and
+ * docs/analysis-2026-09-01 §3.8). The directory dsh works in is the
  * auto-update workspace: the updater runs `git fetch` / `git reset --hard`
- * against it, so any staged change, commit or checkout we made there would be
- * silently destroyed on the next update. Exposing those operations from a
- * sidebar that looks like an IDE would be actively dangerous, so the panel
- * reports `writeLocked` and offers nothing but status and diffs.
+ * against it, so anything we staged or committed there would be silently
+ * destroyed on the next update. When the sidebar points at that directory the
+ * panel reports `writeLocked`, the UI says so out loud, and every write is
+ * refused before git is ever spawned.
+ *
+ * History-rewriting or work-destroying operations (checkout, reset --hard,
+ * clean, branch switching) are deliberately absent — they need a different
+ * confirmation design and are not justifiable from a side panel yet.
  *
  * Design rules, same as dsh-stream.ts:
  *  - **No Electron import** — it is `node:child_process` only, so the whole
@@ -19,7 +25,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import {
   parsePorcelainZ,
   parseBranch,
@@ -76,6 +82,17 @@ export interface GitDiffResult {
   truncated: boolean
   error?: string
 }
+
+/** Result of a write operation (stage / unstage / commit). */
+export interface GitWriteResult {
+  ok: boolean
+  error?: string
+}
+
+/** One write may touch at most this many files (a drag box-selection bug must not stage a whole drive). */
+export const WRITE_FILE_LIMIT = 500
+/** Hard cap on a commit message coming over IPC. */
+export const COMMIT_MESSAGE_MAX = 4000
 
 export interface GitServiceOptions {
   /** Injected in tests; defaults to node's spawn. */
@@ -169,14 +186,13 @@ export class GitService {
     }
   }
 
-  /**
-   * Unified diff for one file.
-   *
-   * `--` separates paths from options so a filename starting with `-` (legal
-   * on every platform) cannot be parsed as a flag.
-   */
-  async diffText(dir: string, file: string, opts: { staged?: boolean } = {}): Promise<GitDiffResult> {
-    if (!dir || !file) return { ok: false, text: '', truncated: false, error: '缺少路径' }
+/**
+ * Unified diff for one file.
+ *
+ * `--` separates paths from options so a filename starting with `-` (legal
+ * on every platform) cannot be parsed as a flag.
+ */
+async diffText(dir: string, file: string, opts: { staged?: boolean } = {}): Promise<GitDiffResult> {    if (!dir || !file) return { ok: false, text: '', truncated: false, error: '缺少路径' }
     // Traversal guard. The renderer hands us strings over IPC; this is the last
     // place before the process boundary where we can refuse.
     if (!isSafeDiffPath(dir, file)) {
@@ -195,6 +211,125 @@ export class GitService {
       return { ok: true, text: run.stdout.slice(0, MAX_DIFF_CHARS), truncated: true }
     }
     return { ok: true, text: run.stdout, truncated: false }
+  }
+
+  // ── write operations (stage / unstage / commit) ──
+  //
+  // The class was read-only for a reason: when the sidebar points at the
+  // auto-update workspace, the updater runs `git fetch` / `git reset --hard`
+  // against it and would silently destroy anything we wrote. Writes are
+  // therefore guarded by THREE checks (docs/analysis-2026-09-01 §3.8), all
+  // enforced HERE, in the only module that shells out to git — the renderer
+  // cannot bypass them by crafting an IPC message:
+  //
+  //   1. `isWriteLocked(dir)` — the directory is the auto-update workspace
+  //      (or inside it): every write is refused, and the sidebar shows why.
+  //   2. a live `.git/index.lock` — another process holds the index (an
+  //      editor, the updater mid-run): refuse rather than fight over it.
+  //      Located via `git rev-parse --git-path` so worktrees/submodules
+  //      (where `.git` is a file) resolve correctly.
+  //   3. commit refuses an empty/oversized message — a blank commit made by
+  //      a mis-click is worse than one not made.
+  //
+  // What is deliberately NOT here: checkout/reset/clean/branch switching.
+  // Those destroy uncommitted work and need a different confirmation design;
+  // stage/unstage/commit only move content between the worktree, the index
+  // and history — nothing the user typed is ever lost.
+
+  /** Stage current worktree content for the given files. */
+  async stage(dir: string, files: readonly string[]): Promise<GitWriteResult> {
+    return this.writeFiles(dir, files, ['add', '--'], '暂存')
+  }
+
+  /** Unstage (index → HEAD) for the given files. */
+  async unstage(dir: string, files: readonly string[]): Promise<GitWriteResult> {
+    return this.writeFiles(dir, files, ['reset', '-q', 'HEAD', '--'], '取消暂存')
+  }
+
+  /** Commit whatever is staged. Hooks run normally — never skipped. */
+  async commit(dir: string, message: string): Promise<GitWriteResult> {
+    const guard = await this.guardWrite(dir)
+    if (guard) return { ok: false, error: guard }
+    const msg = typeof message === 'string' ? message.trim() : ''
+    if (!msg) return { ok: false, error: '提交信息不能为空' }
+    if (msg.length > COMMIT_MESSAGE_MAX) {
+      return { ok: false, error: `提交信息过长（上限 ${COMMIT_MESSAGE_MAX} 字符）` }
+    }
+    const run = await this.run(dir, ['commit', '-m', msg])
+    if (run.error) return { ok: false, error: run.error }
+    if (run.code !== 0) {
+      // The common failure — no user.name/user.email — deserves a plain
+      // sentence rather than git's multi-line hint.
+      const err = run.stderr.trim()
+      return {
+        ok: false,
+        error: err.includes('user.name') || err.includes('user.email')
+          ? 'git 尚未配置提交身份（user.name / user.email），请先在 git 里配置'
+          : err || `git commit 退出码 ${run.code}`,
+      }
+    }
+    return { ok: true }
+  }
+
+  private async writeFiles(
+    dir: string,
+    files: readonly string[],
+    cmd: readonly string[],
+    verb: string,
+  ): Promise<GitWriteResult> {
+    const guard = await this.guardWrite(dir)
+    if (guard) return { ok: false, error: guard }
+    const list = this.safeFileList(dir, files)
+    if (typeof list === 'string') return { ok: false, error: list }
+    if (list.length === 0) return { ok: false, error: `未选择任何要${verb}的文件` }
+    const run = await this.run(dir, [...cmd, ...list])
+    if (run.error) return { ok: false, error: run.error }
+    if (run.code !== 0) {
+      return { ok: false, error: run.stderr.trim() || `git ${cmd[0]} 退出码 ${run.code}` }
+    }
+    return { ok: true }
+  }
+
+  /**
+   * The three write guards, shared by every entry point. Returns the refusal
+   * reason, or null when the write may proceed.
+   */
+  private async guardWrite(dir: string): Promise<string | null> {
+    if (!dir) return '目录为空'
+    if (this.isWriteLocked(dir)) return '此目录由自动更新管理，禁止写操作'
+    const lock = await this.indexLockPath(dir)
+    if (lock && existsSync(lock)) return 'git 正被其他进程占用（index.lock），请稍后再试'
+    return null
+  }
+
+  /**
+   * Ask git itself where the index lock lives, so worktrees/submodules
+   * (where `.git` is a FILE pointing elsewhere) resolve correctly. A null
+   * answer means "could not ask" — treated as no lock rather than a veto,
+   * because the write attempt itself will fail honestly if there is one.
+   */
+  private async indexLockPath(dir: string): Promise<string | null> {
+    const run = await this.run(dir, ['rev-parse', '--git-path', 'index.lock'])
+    if (run.code !== 0) return null
+    const out = run.stdout.trim()
+    if (!out) return null
+    return isAbsolute(out) ? out : join(dir, out)
+  }
+
+  /**
+   * Validate a renderer-supplied file list: strings only, inside `dir`,
+   * no `..`, deduped, bounded. Returns the cleaned list, or an error string.
+   */
+  private safeFileList(dir: string, files: readonly string[]): string[] | string {
+    if (!Array.isArray(files)) return '文件列表无效'
+    if (files.length > WRITE_FILE_LIMIT) return `一次最多操作 ${WRITE_FILE_LIMIT} 个文件`
+    const out: string[] = []
+    for (const f of files) {
+      if (typeof f !== 'string' || f.length === 0) return '文件列表包含空路径'
+      if (!isSafeDiffPath(dir, f)) return '路径不在该目录内'
+      if (!out.includes(f)) out.push(f)
+    }
+    return out
   }
 
   /**

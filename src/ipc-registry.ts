@@ -535,6 +535,61 @@ export function registerIpc(deps: IpcDeps): () => void {
     return { ok: true }
   })
 
+  // ── Sidebar: git write operations ──
+  //
+  // Thin forwarders: every §3.8 guard (managed directory, index.lock, message
+  // sanity, path validation) lives in git-service.ts, the only module that
+  // shells out to git. These handlers exist so the renderer cannot craft
+  // arbitrary argv — paths are re-validated against the sidebar's current
+  // root here too (safeSidebarPath), the same boundary the read paths use.
+  // SidebarService handles the aftermath (invalidate cache, force refresh,
+  // announce), so the page's git strip updates without waiting the refresh
+  // floor out.
+
+  /**
+   * Re-validate a renderer-supplied file list against the sidebar's current
+   * root. Returns the cleaned list, or an error string.
+   */
+  const safeSidebarFileList = (
+    sidebar: SidebarService | null,
+    files: unknown,
+  ): string[] | string => {
+    if (!sidebar || !sidebar.root) return '侧栏尚未就绪'
+    if (!Array.isArray(files)) return '文件列表无效'
+    if (files.length === 0) return '未选择任何文件'
+    const out: string[] = []
+    for (const f of files) {
+      if (typeof f !== 'string' || f.length === 0) return '文件列表包含空路径'
+      const safe = safeSidebarPath(sidebar, f)
+      if (!safe) return '路径不在侧栏目录内'
+      if (!out.includes(safe)) out.push(safe)
+    }
+    return out
+  }
+
+  ipcMain.handle('sidebar:stage', async (_e, files: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    const list = safeSidebarFileList(sidebar, files)
+    if (typeof list === 'string') return { ok: false, error: list }
+    return sidebar.stage(list)
+  })
+
+  ipcMain.handle('sidebar:unstage', async (_e, files: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    const list = safeSidebarFileList(sidebar, files)
+    if (typeof list === 'string') return { ok: false, error: list }
+    return sidebar.unstage(list)
+  })
+
+  ipcMain.handle('sidebar:commit', async (_e, message: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    return sidebar.commit(typeof message === 'string' ? message : '')
+  })
+
+
   ipcMain.handle('sidebar:set-width', (_e, w: number) => {
     if (typeof w !== 'number' || !Number.isFinite(w)) return
     getWindowManager()?.setSidebarWidth(w)

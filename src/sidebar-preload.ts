@@ -120,6 +120,24 @@ contextBridge.exposeInMainWorld('dshSidebar', {
   getPrefs: (): Promise<{ sidebarWidth: number; sidebarVisible: boolean }> =>
     ipcRenderer.invoke('sidebar:get-prefs'),
 
+  // ── git write operations (guarded in git-service.ts) ──
+  //
+  // The three §3.8 guards (managed directory, index.lock, message sanity)
+  // live in the MAIN process — the renderer cannot bypass them, which is the
+  // point of putting them there. The page only forwards user intent.
+
+  /** Stage current worktree content for the given paths. */
+  stageFiles: (paths: string[]): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sidebar:stage', paths),
+
+  /** Unstage (index → HEAD) for the given paths. */
+  unstageFiles: (paths: string[]): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sidebar:unstage', paths),
+
+  /** Commit whatever is staged, with the given message. */
+  commit: (message: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('sidebar:commit', message),
+
   /** True when this page is running inside Electron with the bridge installed. */
   ready: (): boolean => true,
 

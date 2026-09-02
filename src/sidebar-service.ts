@@ -9,7 +9,7 @@
  * throttling behaviour is unit-testable.
  */
 import { FileTree } from './file-tree.js'
-import { GitService, type GitDiffResult, type GitSnapshot } from './git-service.js'
+import { GitService, type GitDiffResult, type GitSnapshot, type GitWriteResult } from './git-service.js'
 import type { GitStatusEntry, GitStatusSummary, TreeRow } from './fs-tree.js'
 
 /**
@@ -233,5 +233,39 @@ export class SidebarService {
       return { ok: false, text: '', truncated: false, error: '尚未选择目录' }
     }
     return this.git.diffText(this.tree.root, path)
+  }
+
+  // ── git write operations ──
+  //
+  // Thin forwarders to GitService, which owns every §3.8 guard. The value
+  // added here is the AFTERMATH: a successful write invalidates the cached
+  // status (the whole point of the write was to change it) and forces an
+  // immediate refresh + announcement, so the panel reflects reality instead
+  // of waiting out the 3s refresh floor.
+
+  /** Stage current worktree content for the given paths. */
+  async stage(files: readonly string[]): Promise<GitWriteResult> {
+    return this.write(() => this.git.stage(this.tree.root, files))
+  }
+
+  /** Unstage (index → HEAD) for the given paths. */
+  async unstage(files: readonly string[]): Promise<GitWriteResult> {
+    return this.write(() => this.git.unstage(this.tree.root, files))
+  }
+
+  /** Commit whatever is staged. Hooks run normally — never skipped. */
+  async commit(message: string): Promise<GitWriteResult> {
+    return this.write(() => this.git.commit(this.tree.root, message))
+  }
+
+  private async write(run: () => Promise<GitWriteResult>): Promise<GitWriteResult> {
+    if (!this.tree.root) return { ok: false, error: '尚未选择目录' }
+    const r = await run()
+    // Announce even on failure: the error text rides the snapshot's git
+    // error field only for reads, so the page's own result handling shows
+    // write failures — but the forced refresh must happen regardless.
+    this.lastGitAt = 0
+    await this.refreshGit(true)
+    return r
   }
 }

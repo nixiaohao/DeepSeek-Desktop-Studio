@@ -120,6 +120,29 @@
   .b.M, .b.\! { color: var(--warn); }
   .b.\? { color: var(--accent); }
   .b.\● { color: var(--ok); }
+  /* Per-row stage/unstage. A tiny fixed hit area, pushed to the row's end;
+     only rendered when the directory is NOT write-locked. */
+  .file .act {
+    flex: none; margin-left: auto; background: transparent; color: var(--fg-dim);
+    border: 1px solid var(--border); border-radius: 3px;
+    width: 18px; height: 16px; line-height: 14px; padding: 0; text-align: center;
+    font-size: var(--fs-sm); font-family: var(--font-ui); cursor: pointer;
+  }
+  .file .act:hover { color: #fff; border-color: var(--accent); }
+
+  /* ── commit bar ── */
+  #commitBar {
+    flex: none; display: flex; flex-direction: column; gap: 4px;
+    padding: 6px 7px; border-top: 1px solid var(--border); background: var(--bg-2);
+  }
+  #commitBar textarea {
+    resize: none; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px; outline: none;
+    padding: 4px 6px; font-family: var(--font-ui); font-size: var(--fs-md);
+  }
+  #commitBar textarea:focus { border-color: var(--accent); }
+  #commitBar .row2 { display: flex; align-items: center; gap: 6px; }
+  #commitBar .hint { flex: 1; color: var(--fg-dim); font-size: var(--fs-sm); }
 
   /* ── diff ── */
   #diffWrap { flex: 1 1 40%; display: none; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
@@ -209,6 +232,13 @@
   <div id="changedWrap" style="display:none">
     <div class="sec-title"><span>改动</span><span id="changedCount" style="opacity:.7"></span></div>
     <div id="changed"></div>
+    <div id="commitBar" style="display:none">
+      <textarea id="commitMsg" rows="2" placeholder="提交信息（提交已暂存的改动）"></textarea>
+      <div class="row2">
+        <span class="hint">提交已暂存（●）的改动；hooks 正常运行</span>
+        <button id="btn-commit">提交</button>
+      </div>
+    </div>
   </div>
 
   <div id="diffWrap">
@@ -326,6 +356,13 @@
              '在此做的改动会在下次更新时被覆盖。</div>';
     }
     notes.innerHTML = out;
+
+    // The commit bar exists only where a commit is possible AND meaningful:
+    // a repo, not write-locked, with something staged to describe.
+    var bar = $('commitBar');
+    var s2 = git.summary || {};
+    var commitable = !!git.isRepo && !git.writeLocked && s2.staged > 0;
+    bar.style.display = commitable ? '' : 'none';
   }
 
   // ── changed files ────────────────────────────────────────────────────
@@ -342,11 +379,20 @@
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
       var dir = f.path.replace(/\\/g, '/').replace(/\/[^/]*$/, '');
+      // Stage/unstage actions: only when the directory is not managed by the
+      // auto-updater (the guards would refuse anyway — hiding them says why
+      // before the user wonders). A file staged AND unstaged gets both.
+      var acts = '';
+      if (!git.writeLocked) {
+        if (f.staged) acts += '<button class="act" data-act="unstage" title="取消暂存">−</button>';
+        if (!f.staged) acts += '<button class="act" data-act="stage" title="暂存">＋</button>';
+      }
       html +=
         '<div class="file' + (f.path === selected ? ' on' : '') + '" data-p="' + esc(f.path) + '">' +
         '<span class="b">' + esc(f.conflicted ? '!' : f.untracked ? '?' : f.staged && f.unstaged ? 'M' : f.staged ? '●' : 'M') + '</span>' +
         '<span class="n">' + esc(f.path.replace(/\\/g, '/').split('/').pop()) + '</span>' +
         (dir ? '<span class="d">' + esc(dir) + '</span>' : '') +
+        acts +
         '</div>';
     }
     changedEl.innerHTML = html;
@@ -585,12 +631,47 @@
   });
 
   changedEl.addEventListener('click', function (e) {
+    // Stage/unstage buttons take priority over selecting the file: the click
+    // target is the button itself, and selecting a file the user meant to
+    // stage would swap the diff out from under them.
+    var act = e.target.closest ? e.target.closest('.act') : null;
+    if (act) {
+      var p = act.closest('.file').getAttribute('data-p');
+      var kind = act.getAttribute('data-act');
+      if (!p) return;
+      var call = kind === 'stage' ? api.stageFiles([p]) : api.unstageFiles([p]);
+      call.then(function (r) {
+        if (r && r.ok) toast(kind === 'stage' ? '已暂存' : '已取消暂存');
+        else report(r);
+        // No manual refresh needed: SidebarService forces one after every
+        // write and announces it through onUpdate → repaint.
+      }).catch(function () { toast('操作失败', true); });
+      return;
+    }
     var row = e.target.closest ? e.target.closest('.file') : null;
     if (!row) return;
     var p = row.getAttribute('data-p');
     if (!p) return;
     if (p === selected) hideDiff();
     else showDiff(p);
+  });
+
+  $('btn-commit').addEventListener('click', function () {
+    var msg = $('commitMsg').value;
+    var btn = $('btn-commit');
+    btn.disabled = true;
+    api.commit(msg).then(function (r) {
+      btn.disabled = false;
+      if (r && r.ok) {
+        $('commitMsg').value = '';
+        toast('已提交');
+      } else {
+        report(r);
+      }
+    }).catch(function () {
+      btn.disabled = false;
+      toast('提交失败', true);
+    });
   });
 
   changedEl.addEventListener('dblclick', function (e) {
