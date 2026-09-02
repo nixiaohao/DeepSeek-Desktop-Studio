@@ -36,16 +36,57 @@ const HTML_ASSETS = [path.join('assets', 'panel.html'), path.join('assets', 'sta
  * channel throws only for the user). A hand-written second copy would
  * inevitably drift.
  */
+/**
+ * `minMethods` is per-bridge rather than one global floor.
+ *
+ * The floor exists to catch a preload whose shape changed so badly the brace
+ * matcher found nothing. The diagnostics bridge sits BELOW the others on
+ * purpose: it is three methods because it must require nothing but 'electron'
+ * to stay sandboxed, and growing it back toward five would mean a local
+ * require — which is the failure mode the diagnostics window exists to report.
+ * A single global floor would either be wrong for it or useless for the others.
+ */
 const BRIDGES = [
-  { name: 'panel', preload: 'panel-preload.ts', world: 'dshPanel', ns: 'panel:', html: HTML_ASSETS },
+  {
+    name: 'panel',
+    preload: 'panel-preload.ts',
+    world: 'dshPanel',
+    ns: 'panel:',
+    html: HTML_ASSETS,
+    minMethods: 5,
+  },
   {
     name: 'sidebar',
     preload: 'sidebar-preload.ts',
     world: 'dshSidebar',
     ns: 'sidebar:',
     html: [path.join('assets', 'sidebar.html')],
+    minMethods: 5,
+  },
+  // The self-check window gets the SAME treatment as the overlays, not an
+  // exemption: it is the one surface a user opens when everything else looks
+  // broken, so an unregistered channel here would fail silently at exactly the
+  // wrong moment.
+  {
+    name: 'diagnostics',
+    preload: 'diagnostics-preload.ts',
+    world: 'dshDiag',
+    ns: 'diag:',
+    html: [path.join('assets', 'diagnostics.html')],
+    minMethods: 3,
   },
 ]
+
+/**
+ * Every page the app loads, deduped.
+ *
+ * The CSP check used to walk `HTML_ASSETS` alone, which was the panel/statusbar
+ * pair from before the sidebar existed. The sidebar and diagnostics pages were
+ * therefore never checked against their own policy: a page could ship with
+ * `script-src 'self'` and an inline script and no test would notice, and the
+ * symptom is a page that renders and does nothing.
+ */
+const ALL_PAGES = [...new Set(BRIDGES.flatMap((b) => b.html))]
 
 let pass = 0
 let fail = 0
@@ -113,17 +154,39 @@ function channelsInvoked(src) {
 function channelsListened(src) {
   return new Set([...src.matchAll(/ipcRenderer\.on\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]))
 }
+/**
+ * Fire-and-forget renderer→main sends.
+ *
+ * These used to be invisible to this contract, which is exactly how a new
+ * channel (`panel:view-ready`) could be added with nothing checking that the
+ * main process ever listens for it. A send with no `ipcMain.on` fails silently
+ * and is the worst possible way for a diagnostics feature to break.
+ */
+function channelsSent(src) {
+  return new Set([...src.matchAll(/ipcRenderer\.send\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]))
+}
 function channelsHandled(src) {
   return new Set([...src.matchAll(/ipcMain\.handle\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]))
 }
+function channelsOnRegistered(src) {
+  return new Set([...src.matchAll(/ipcMain\.on\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]))
+}
 
 const handled = channelsHandled(registrySrc)
+const listening = channelsOnRegistered(registrySrc)
 /** Every `*:` channel the registry registers, grouped by namespace. */
 const handledByNs = new Map()
 for (const ch of handled) {
   const ns = ch.slice(0, ch.indexOf(':') + 1)
   if (!handledByNs.has(ns)) handledByNs.set(ns, new Set())
   handledByNs.get(ns).add(ch)
+}
+/** Same grouping for `ipcMain.on`, so sends can be checked the same way. */
+const listeningByNs = new Map()
+for (const ch of listening) {
+  const ns = ch.slice(0, ch.indexOf(':') + 1)
+  if (!listeningByNs.has(ns)) listeningByNs.set(ns, new Set())
+  listeningByNs.get(ns).add(ch)
 }
 
 console.log('panel-api: bridge surface')
@@ -133,9 +196,9 @@ for (const bridge of BRIDGES) {
   const exposed = exposedMethods(src, bridge.world)
 
   assert(
-    exposed.size >= 5,
+    exposed.size >= bridge.minMethods,
     `${bridge.name}: bridge exposes ${exposed.size} methods`,
-    `${bridge.name} bridge looks empty — did ${bridge.preload} change shape?`
+    `${bridge.name} bridge exposes only ${exposed.size}, expected at least ${bridge.minMethods} — did ${bridge.preload} change shape?`
   )
 
   for (const asset of bridge.html) {
@@ -185,6 +248,31 @@ for (const bridge of BRIDGES) {
     )
   }
 
+  // ── 2b. Fire-and-forget sends must have an ipcMain.on ──
+
+  const sent = channelsSent(src)
+
+  for (const ch of sent) {
+    assert(
+      ch.startsWith(bridge.ns),
+      `${bridge.name}: send channel ${ch} is namespaced ${bridge.ns}*`,
+      `${ch} must be prefixed ${bridge.ns}* so it cannot collide with another overlay's channels`
+    )
+    assert(
+      listening.has(ch),
+      `ipcMain.on('${ch}') is registered`,
+      `${bridge.preload} sends '${ch}' but ipc-registry.ts never listens for it — a send with no listener fails silently`
+    )
+  }
+
+  for (const ch of listeningByNs.get(bridge.ns) ?? []) {
+    assert(
+      sent.has(ch) || src.includes(`'${ch}'`),
+      `${bridge.name}: listener '${ch}' is reachable from the preload`,
+      `ipc-registry.ts listens on '${ch}' but ${bridge.preload} never sends it`
+    )
+  }
+
   // Guard against the reverse drift: a handler nobody calls is dead code, and
   // it is usually the fingerprint of a rename that only half-landed.
   for (const ch of handledByNs.get(bridge.ns) ?? []) {
@@ -201,7 +289,7 @@ for (const bridge of BRIDGES) {
 console.log('panel-api: namespace isolation')
 for (const bridge of BRIDGES) {
   const src = read(path.join('src', bridge.preload))
-  for (const ch of [...channelsInvoked(src), ...channelsListened(src)]) {
+  for (const ch of [...channelsInvoked(src), ...channelsListened(src), ...channelsSent(src)]) {
     if (ch.startsWith(bridge.ns) || !ch.includes(':')) continue
     bad(
       `${bridge.name}: ${ch} stays inside its own namespace`,
@@ -216,6 +304,7 @@ for (const bridge of BRIDGES) {
   const src = read(path.join('src', bridge.preload))
   for (const ch of channelsInvoked(src)) allTouched.add(ch)
   for (const ch of channelsListened(src)) allTouched.add(ch)
+  for (const ch of channelsSent(src)) allTouched.add(ch)
 }
 assert(allTouched.size >= 15, `contract covers ${allTouched.size} channels`, `only ${allTouched.size} channels were checked — did a preload stop parsing?`)
 
@@ -233,7 +322,7 @@ console.log('panel-api: CSP vs inline scripts')
  * to load fails identically silently. `default-src 'none'` still blocks every
  * remote load, so the exposure here is limited to code that ships with the app.
  */
-for (const asset of HTML_ASSETS) {
+for (const asset of ALL_PAGES) {
   const html = read(asset)
   // Two passes, not one character class: the content itself contains single
   // quotes ('none'), so a ["']-delimited capture stops at the first directive.
@@ -281,7 +370,6 @@ console.log('panel-api: inline script syntax')
  * parse prose as JavaScript and swallow the real script tag.
  */
 const vm = require('node:vm')
-const ALL_PAGES = BRIDGES.flatMap((b) => b.html)
 
 for (const asset of ALL_PAGES) {
   const stripped = read(asset).replace(/<!--[\s\S]*?-->/g, '')

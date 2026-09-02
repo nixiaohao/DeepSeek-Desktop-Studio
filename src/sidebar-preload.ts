@@ -122,3 +122,12 @@ contextBridge.exposeInMainWorld('dshSidebar', {
   highlight: (code: string, filePath: string): string =>
     highlightCode(code, languageForPath(filePath)),
 })
+
+// Same readiness ping as panel-preload.ts — see the comment there for why it
+// sits after exposeInMainWorld and why it is wrapped in try/catch.
+try {
+  const view = new URLSearchParams(location.search).get('view') || 'sidebar'
+  ipcRenderer.send('sidebar:view-ready', view)
+} catch {
+  /* the diagnostics report will show this view as never-ready */
+}

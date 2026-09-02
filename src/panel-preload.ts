@@ -202,3 +202,25 @@ contextBridge.exposeInMainWorld('dshPanel', {
   highlight: (code: string, filePath: string): string =>
     highlightCode(code, languageForPath(filePath)),
 })
+
+/**
+ * Tell the main process this preload finished and the bridge is live.
+ *
+ * Placed AFTER `exposeInMainWorld` on purpose, so the ping means "the bridge
+ * exists" and not merely "the module started executing". A preload that throws
+ * on any require above never reaches this line, and the ABSENCE of the ping is
+ * what the diagnostics report turns into a red row naming the real cause.
+ *
+ * The label is read from the page URL rather than hard-coded: this one file
+ * serves both the panel and the status bar, and window-manager keys the report
+ * on the same three labels.
+ *
+ * Wrapped in try/catch because a ping that fails must never take the bridge
+ * down with it — the main process already treats a missing ping as "not ready".
+ */
+try {
+  const view = new URLSearchParams(location.search).get('view') || 'panel'
+  ipcRenderer.send('panel:view-ready', view)
+} catch {
+  /* the diagnostics report will show this view as never-ready */
+}

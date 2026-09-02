@@ -11,6 +11,7 @@
  *   - legacy:   `switch-theme`, `get-themes`, `get-version`, `window-*`
  *   - panel:    `panel:*`   (namespaced so they cannot collide with the above)
  *   - sidebar:  `sidebar:*` (the file/git sidebar; likewise namespaced)
+ *   - diag:     `diag:*`    (the standalone diagnostics window)
  *
  * Every channel STRING in the app lives in this file, because that is what
  * test/panel-api.contract.cjs correlates against: a name defined anywhere else
@@ -25,7 +26,10 @@ import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import { savePreferences, loadPanelPrefs, savePanelPrefs, loadExternalEditor } from './preferences.js'
 import { openInEditor } from './external-editor.js'
 import { isWithinRoot } from './fs-tree.js'
+import { redactTokenInText } from './redact.js'
 import { commonTool, normalizeIds } from './approval-groups.js'
+import { collectDiagnostics } from './diagnostics-host.js'
+import type { DiagnosticsHostDeps } from './diagnostics-host.js'
 import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
 import type { SidebarService } from './sidebar-service.js'
@@ -46,6 +50,15 @@ export interface IpcDeps {
    * smoke test calls it with neither a stream nor a sidebar.
    */
   getSidebar?: () => SidebarService | null
+  /**
+   * Getters behind the diagnostics self-check, or null before the app has
+   * finished booting. main.ts owns every subsystem they touch, so it is the
+   * only place that can build this.
+   *
+   * Optional for the same reason `getSidebar` is: `registerIpc()` has to stay
+   * callable before any of those subsystems exist.
+   */
+  getDiagnosticsHost?: () => DiagnosticsHostDeps | null
   getAppVersion: () => string
   /**
    * Restart the backend process only. The caller (main.ts) must reload the
@@ -184,6 +197,28 @@ export function registerIpc(deps: IpcDeps): () => void {
     deps.quitApp()
   })
 
+  // ── Preload readiness (feeds the diagnostics report) ──
+  //
+  // One listener per namespace because the channel is namespaced, NOT because
+  // the two behave differently — panel-preload.js serves both the panel and the
+  // status bar and reports which one it is via the label argument.
+  //
+  // The label is renderer-supplied and therefore untrusted: markViewReady()
+  // ignores anything it does not already know about, so a hostile or merely
+  // confused page cannot invent a fourth overlay in the report.
+  const onViewReady = (_e: unknown, label: unknown): void => {
+    if (typeof label !== 'string') return
+    getWindowManager()?.markViewReady(label)
+  }
+  //
+  // Literal channel names, NOT a loop over an array of names. The shared body
+  // is hoisted instead of repeated. A computed name would be invisible to
+  // panel-api.contract.cjs, which scans this file as TEXT for `ipcMain.on('…')`
+  // — and an unlistened send is exactly the silent failure this ping exists to
+  // prevent, so it must stay greppable.
+  ipcMain.on('panel:view-ready', onViewReady)
+  ipcMain.on('sidebar:view-ready', onViewReady)
+
   // ── Panel: backend output ──
 
   ipcMain.handle('panel:backend-history', (_e, limit?: number) =>
@@ -307,6 +342,49 @@ export function registerIpc(deps: IpcDeps): () => void {
   ipcMain.handle('panel:get-prefs', () => {
     const wm = getWindowManager()
     return wm ? wm.panelPrefs : loadPanelPrefs()
+  })
+
+  // ── Diagnostics: standalone self-check window ──
+
+  /**
+   * Full self-check report plus the tail of each log file.
+   *
+   * Returns `{error}` rather than throwing when the host is not wired up yet:
+   * the diagnostics window is what the user opens when the app looks broken,
+   * and a rejected IPC promise there shows an empty page with no explanation —
+   * the one outcome this feature exists to prevent.
+   */
+  ipcMain.handle('diag:report', () => {
+    const host = deps.getDiagnosticsHost?.() ?? null
+    if (!host) return { error: '自检数据尚未就绪（应用还在启动）' }
+    try {
+      return collectDiagnostics(host)
+    } catch (err) {
+      return { error: (err as Error).message || '收集自检数据失败' }
+    }
+  })
+
+  ipcMain.handle('diag:open-logs', async () => {
+    const err = await shell.openPath(getLogDir())
+    return err ? { ok: false, error: err } : { ok: true }
+  })
+
+  /**
+   * Copy report text to the clipboard, redacted on the way out.
+   *
+   * The report embeds raw log lines, and the dsh launch token is minted per
+   * process. Redacting here rather than in the page means the guarantee cannot
+   * be bypassed by a page-side change, and it covers text the user selected out
+   * of a log tail as well as the generated report.
+   */
+  ipcMain.handle('diag:copy', (_e, text: unknown) => {
+    if (typeof text !== 'string' || !text) return { ok: false, error: '没有可复制的内容' }
+    try {
+      clipboard.writeText(redactTokenInText(text))
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
   })
 
   // ── Sidebar: file tree + git ──

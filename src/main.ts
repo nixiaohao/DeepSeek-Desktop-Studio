@@ -29,13 +29,14 @@ import { runWizard } from './wizard.js'
 import { log, getLogDir, isDebug, redactTokenInText } from './logging.js'
 import { relaunchApp } from './relaunch.js'
 import { WindowManager } from './window-manager.js'
-import { HealthMonitor } from './health-monitor.js'
+import { HealthMonitor, PHASE_LABEL, type HealthPhase } from './health-monitor.js'
 import { registerIpc, setWindowManagerAccessor, pushSidebarUpdate } from './ipc-registry.js'
 import { DshStream } from './dsh-stream.js'
 import { describeEditorConfig, pickEditorInteractively } from './external-editor.js'
 import { FileTree } from './file-tree.js'
 import { GitService } from './git-service.js'
 import { SidebarService } from './sidebar-service.js'
+import { openDiagnosticsWindow, closeDiagnosticsWindow } from './diagnostics-window.js'
 
 // ── Startup hardening (must run before app ready) ──
 // 1. GPU 加速在虚拟机/远程桌面/部分驱动上会导致白屏或启动崩溃，本应用为 Web UI 外壳，无需 GPU。
@@ -347,6 +348,9 @@ function quitApp(): void {
     windowManager?.destroy()
   } catch { /* window already gone */ }
   windowManager = null
+  // Separate from the main window: it has its own process-lifetime handle, and
+  // leaving it open would keep the app alive after everything else shut down.
+  closeDiagnosticsWindow()
   try {
     if (mainWindow) {
       const b = mainWindow.getBounds()
@@ -811,6 +815,10 @@ function buildMenuActions(): MenuActions {
       void shell.openPath(getLogDir())
     },
 
+    openDiagnostics: () => {
+      openDiagnosticsWindow()
+    },
+
     describeEditor: () => describeEditorConfig(loadExternalEditor()),
     chooseEditor: () => {
       pickEditorInteractively(mainWindow)
@@ -856,6 +864,31 @@ app.whenReady().then(async () => {
     restartBackend,
     getStatusInfo: statusInfo,
     quitApp,
+
+    // Diagnostics. Every getter is late-bound and defensive: the self-check
+    // window can be opened at any point in the boot sequence, including before
+    // the workspace, the window or the health monitor exist — which is exactly
+    // when someone needs to open it.
+    getDiagnosticsHost: () => ({
+      version: () => launcher?.version ?? app.getVersion(),
+      dsh: statusInfo,
+      workspace: () => workspaceDir,
+      health: () => healthMonitor?.snapshot() ?? null,
+      healthPhaseLabel: (phase: string) => PHASE_LABEL[phase as HealthPhase] ?? phase,
+      // Content size, not window size: the self-check asks "can the user see
+      // anything", and the chrome is not what goes missing.
+      window: () => {
+        const win = windowManager?.window
+        if (!win) return null
+        try {
+          const [width, height] = win.getContentSize()
+          return { width, height, visible: win.isVisible() }
+        } catch {
+          return null
+        }
+      },
+      views: () => windowManager?.viewStates() ?? {},
+    }),
   })
 
   setupMenu(buildMenuActions())

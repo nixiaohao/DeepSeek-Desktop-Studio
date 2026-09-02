@@ -39,6 +39,17 @@ export interface MenuActions {
   restartBackend: () => void
   openLogs: () => void
 
+  // ── diagnostics ──
+  /**
+   * Open the standalone self-check window.
+   *
+   * It is deliberately reachable from the menu and a shortcut rather than only
+   * from inside the panel: the two failures it was built for (a dead panel
+   * preload, an invisible window) are exactly the states in which the panel
+   * cannot offer a button.
+   */
+  openDiagnostics: () => void
+
   // ── external editor ──
   /** Human-readable description of the current editor. */
   describeEditor: () => string
@@ -126,6 +137,11 @@ export function setupMenu(actions: MenuActions): void {
         {
           label: '打开日志文件夹',
           click: () => actions.openLogs(),
+        },
+        {
+          label: '诊断自检…',
+          accelerator: 'Ctrl+Alt+D',
+          click: () => actions.openDiagnostics(),
         },
       ],
     },

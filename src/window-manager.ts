@@ -28,6 +28,20 @@ import { app, BrowserWindow, WebContentsView } from 'electron'
 import { join } from 'node:path'
 import { loadPanelPrefs, savePanelPrefs, type PanelPrefs } from './preferences.js'
 import { log } from './logging.js'
+import type { ViewState } from './diagnostics.js'
+
+/**
+ * How many preload/renderer failure strings are kept per view.
+ *
+ * These strings are the ONLY surviving record of why a preload died: once it
+ * has thrown, that view can no longer be asked anything, so there is no way to
+ * reconstruct the reason later. Small on purpose — it is diagnostics text, and
+ * the full history is already in launcher.log.
+ */
+const VIEW_ERROR_LIMIT = 8
+
+/** The overlays whose preload health is tracked. */
+export type ViewLabel = 'panel' | 'statusbar' | 'sidebar'
 
 /** Height of the bottom status bar, px. */
 export const STATUS_BAR_HEIGHT = 26
@@ -46,10 +60,54 @@ export class WindowManager {
   private prefs: PanelPrefs
   private avoidCssKey: string | null = null
   private resizeBound = false
+  /**
+   * Per-overlay preload health, seeded in attach() and updated from the
+   * `*:view-ready` ping and the preload-error / render-process-gone events.
+   *
+   * The ping is what makes a dead preload *diagnosable* rather than merely
+   * visible: without it the only symptom is the page's own fallback string,
+   * which cannot say whether the preload never ran, threw while requiring a
+   * module, or was never packaged.
+   */
+  private readonly viewState = new Map<ViewLabel, { readyAt: number; errors: string[] }>()
 
   constructor(win: BrowserWindow) {
     this.win = win
     this.prefs = loadPanelPrefs()
+  }
+
+  /**
+   * Record that an overlay's preload ran to completion and exposed its bridge.
+   *
+   * Called over IPC from the preload itself, which is the only place that can
+   * truthfully claim it: a preload that throws never reaches the send.
+   */
+  markViewReady(label: string): void {
+    const key = label as ViewLabel
+    if (!this.viewState.has(key)) return
+    this.viewState.set(key, { readyAt: Date.now(), errors: this.viewState.get(key)?.errors ?? [] })
+  }
+
+  /** Per-view preload health, for the diagnostics report. */
+  viewStates(): Record<string, ViewState> {
+    const out: Record<string, ViewState> = {}
+    for (const [key, value] of this.viewState) out[key] = { ...value, errors: value.errors.slice() }
+    return out
+  }
+
+  /**
+   * Keep a bounded record of why a view died.
+   *
+   * Deliberately does NOT reset `readyAt`: a view that loaded fine and then
+   * crashed is a different problem from one that never loaded, and collapsing
+   * them would tell the user to look for a preload bug that isn't there.
+   */
+  private recordViewError(label: ViewLabel, message: string): void {
+    const current = this.viewState.get(label)
+    if (!current) return
+    const errors = [...current.errors, message]
+    if (errors.length > VIEW_ERROR_LIMIT) errors.splice(0, errors.length - VIEW_ERROR_LIMIT)
+    this.viewState.set(label, { readyAt: current.readyAt, errors })
   }
 
   /** The main window the overlays are attached to. */
@@ -108,7 +166,11 @@ export class WindowManager {
         sandbox: false,
       },
     })
-    this.panelView.webContents.loadFile(join(assets, 'panel.html'))
+    // The query string is how the preload learns which overlay it is running
+    // in. panel-preload.js serves BOTH the panel and the status bar, so the
+    // label cannot be baked into the file; it reports itself back over
+    // `panel:view-ready` and the diagnostics report is keyed on it.
+    this.panelView.webContents.loadFile(join(assets, 'panel.html'), { query: { view: 'panel' } })
 
     this.statusView = new WebContentsView({
       webPreferences: {
@@ -118,7 +180,7 @@ export class WindowManager {
         sandbox: false,
       },
     })
-    this.statusView.webContents.loadFile(join(assets, 'statusbar.html'))
+    this.statusView.webContents.loadFile(join(assets, 'statusbar.html'), { query: { view: 'statusbar' } })
 
     // The sidebar gets its OWN preload rather than sharing panel-preload.js:
     // that file's exposed API is brace-matched by test/panel-api.contract.cjs,
@@ -136,7 +198,14 @@ export class WindowManager {
         sandbox: false,
       },
     })
-    this.sidebarView.webContents.loadFile(join(assets, 'sidebar.html'))
+    this.sidebarView.webContents.loadFile(join(assets, 'sidebar.html'), { query: { view: 'sidebar' } })
+
+    // Seed the health map BEFORE the views can report anything: a view that
+    // never pings must still appear in the report as "never reported ready"
+    // rather than being absent, because absence would read as "not enabled".
+    this.viewState.set('panel', { readyAt: 0, errors: [] })
+    this.viewState.set('statusbar', { readyAt: 0, errors: [] })
+    this.viewState.set('sidebar', { readyAt: 0, errors: [] })
 
     // Catch preload failures. Electron emits this when the script throws OR
     // never finishes loading. Without it the user sees only a dead "preload 未
@@ -144,14 +213,16 @@ export class WindowManager {
     // and panel.html can show it instead of the dead default.
     for (const view of [this.panelView, this.statusView, this.sidebarView]) {
       if (!view) continue
-      const label =
+      const label: ViewLabel =
         view === this.panelView ? 'panel' : view === this.statusView ? 'statusbar' : 'sidebar'
       view.webContents.on('preload-error', (_e, preloadPath, err) => {
         const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
         log('launcher', `preload-error[${label}] path=${preloadPath} ${message}`)
+        this.recordViewError(label, `preload-error: ${message}`)
       })
       view.webContents.on('render-process-gone', (_e, details) => {
         log('launcher', `renderer-gone[${label}] reason=${details.reason} exitCode=${details.exitCode}`)
+        this.recordViewError(label, `renderer-gone: reason=${details.reason} exitCode=${details.exitCode}`)
       })
     }
 

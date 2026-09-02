@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!--
+  Same CSP reasoning as panel.html: `default-src 'none'` blocks every remote
+  load, and `script-src` needs 'unsafe-inline' because the logic is an inline
+  <script>. See the comment in panel.html for why an external script is not
+  the alternative for a file:// page.
+
+  This page must stay renderable with NO bridge at all. If window.dshDiag is
+  missing the page says so and names the log folder, because "the diagnostics
+  window is broken" is the one failure the user has no next step for.
+-->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline';" />
+<title>诊断自检</title>
+<style>
+  :root {
+    --bg: #14161d;
+    --bg-2: #1a1d26;
+    --border: #272b36;
+    --fg: #d6dae3;
+    --fg-dim: #8b93a7;
+    --accent: #4c8dff;
+    --err: #ff6b6b;
+    --ok: #3ddc84;
+    --warn: #ffb454;
+    --font: 12px/1.6 "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); font: var(--font);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  header {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+  }
+  header .title { font-weight: 600; }
+  header .spacer { flex: 1; }
+  header .summary { font-size: 11px; color: var(--fg-dim); }
+  header .summary b { font-weight: 600; }
+  header .summary .f { color: var(--err); }
+  header .summary .w { color: var(--warn); }
+  header .summary .o { color: var(--ok); }
+
+  button {
+    background: #22262f; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 3px 10px; font: var(--font); font-size: 11px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button:disabled:hover { border-color: var(--border); color: var(--fg); }
+
+  #body { flex: 1; overflow-y: auto; padding: 10px 12px 20px; }
+  #body::-webkit-scrollbar { width: 9px; }
+  #body::-webkit-scrollbar-thumb { background: #2f3441; border-radius: 5px; }
+
+  h2 {
+    font-size: 11px; font-weight: 600; color: var(--fg-dim); text-transform: none;
+    margin: 14px 0 6px; padding-bottom: 3px; border-bottom: 1px solid var(--border);
+  }
+  h2:first-child { margin-top: 0; }
+
+  .row {
+    display: flex; gap: 8px; padding: 4px 6px; border-radius: 3px;
+    border-left: 2px solid transparent; align-items: flex-start;
+  }
+  .row + .row { margin-top: 2px; }
+  .row .tag { flex: none; width: 46px; font-size: 10px; padding-top: 1px; }
+  .row .label { flex: none; width: 96px; color: var(--fg); }
+  .row .detail { flex: 1; min-width: 0; color: var(--fg-dim); word-break: break-all; }
+  .row .hint { flex-basis: 100%; padding-left: 54px; color: var(--fg-dim); font-size: 11px; opacity: .85; }
+
+  .row.ok { border-left-color: var(--ok); }
+  .row.ok .tag { color: var(--ok); }
+  .row.warn { border-left-color: var(--warn); background: rgba(255,180,84,.05); }
+  .row.warn .tag { color: var(--warn); }
+  .row.fail { border-left-color: var(--err); background: rgba(255,107,107,.07); }
+  .row.fail .tag { color: var(--err); }
+  .row.fail .label, .row.fail .detail { color: var(--fg); }
+
+  details { margin-top: 6px; }
+  details > summary {
+    cursor: pointer; padding: 3px 6px; color: var(--fg-dim); font-size: 11px;
+    border-left: 2px solid var(--border); list-style: none;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary:hover { color: var(--accent); }
+  details[open] > summary { color: var(--fg); border-left-color: var(--accent); }
+  .log {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 3px;
+    padding: 6px 8px; margin-top: 4px; max-height: 260px; overflow: auto;
+    white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--out);
+    user-select: text;
+  }
+  .log .empty { color: var(--fg-dim); font-style: normal; }
+  .path { color: var(--fg-dim); font-size: 10px; word-break: break-all; margin-top: 2px; }
+
+  #fatal {
+    margin: 10px 12px; padding: 10px 12px; border: 1px solid var(--err);
+    border-radius: 4px; color: var(--err); display: none; white-space: pre-wrap;
+  }
+  #toast {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+    background: var(--bg-2); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 4px; padding: 5px 12px; font-size: 11px; opacity: 0;
+    transition: opacity .18s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">诊断自检</span>
+    <span class="spacer"></span>
+    <span class="summary" id="summary"></span>
+    <button id="btn-refresh">重新检查</button>
+    <button id="btn-copy">复制报告</button>
+    <button id="btn-logs">打开日志文件夹</button>
+  </header>
+
+  <div id="fatal"></div>
+  <div id="body">
+    <div class="empty" style="color:var(--fg-dim)">正在收集…</div>
+  </div>
+  <div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var api = window.dshDiag;
+  var body = document.getElementById('body');
+  var fatalBox = document.getElementById('fatal');
+  var summaryBox = document.getElementById('summary');
+  var lastText = '';
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'show';
+    setTimeout(function () { t.className = ''; }, 1800);
+  }
+
+  /**
+   * Show the one failure the user has no next step for, and give them one.
+   *
+   * If the bridge is missing then THIS page's preload did not run either, so
+   * the report cannot be fetched — but the log folder is still a real path on
+   * disk, and naming it is the difference between "everything is broken" and
+   * "here is where to look".
+   */
+  function fatal(msg) {
+    fatalBox.style.display = 'block';
+    fatalBox.textContent = msg;
+    body.innerHTML = '';
+    body.appendChild(el('div', 'empty',
+      '诊断窗口自身的 preload 未加载，无法收集信息。请直接查看日志文件夹（见上方按钮）里的 launcher.log。'));
+  }
+
+  function row(c) {
+    var r = el('div', 'row ' + c.level);
+    r.appendChild(el('span', 'tag',
+      c.level === 'ok' ? '通过' : c.level === 'warn' ? '警告' : '失败'));
+    r.appendChild(el('span', 'label', c.label));
+    r.appendChild(el('span', 'detail', c.detail));
+    if (c.hint) r.appendChild(el('span', 'hint', '建议：' + c.hint));
+    return r;
+  }
+
+  function logSection(log) {
+    var d = el('details');
+    var s = el('summary', null, log.name + '.log  (' + log.lines.length + ' 行)');
+    d.appendChild(s);
+    d.appendChild(el('div', 'path', log.path));
+    var pre = el('div', 'log');
+    if (log.error) {
+      pre.appendChild(el('span', 'empty', '读取失败：' + log.error));
+    } else if (!log.lines.length) {
+      pre.appendChild(el('span', 'empty', '（空）'));
+    } else {
+      pre.textContent = log.lines.join('\n');
+    }
+    d.appendChild(pre);
+    return d;
+  }
+
+  function render(payload) {
+    lastText = '';
+    body.innerHTML = '';
+
+    if (!payload || payload.error) {
+      fatalBox.style.display = 'block';
+      fatalBox.textContent = (payload && payload.error) || '收集自检数据失败。';
+      return;
+    }
+    fatalBox.style.display = 'none';
+
+    var report = payload.report;
+    var s = report.summary;
+    summaryBox.innerHTML =
+      '<b class="o">通过 ' + s.ok + '</b> · <b class="w">警告 ' + s.warn + '</b> · <b class="f">失败 ' + s.fail + '</b>';
+
+    body.appendChild(el('h2', null, '检查项（失败与警告排在最前）'));
+    for (var i = 0; i < report.checks.length; i++) body.appendChild(row(report.checks[i]));
+
+    body.appendChild(el('h2', null, '日志尾部'));
+    for (var j = 0; j < payload.logs.length; j++) body.appendChild(logSection(payload.logs[j]));
+    if (payload.logDir) body.appendChild(el('div', 'path', '日志目录：' + payload.logDir));
+
+    // Built here rather than in the main process so the copy is byte-identical
+    // to what the user just read, including the log tails.
+    lastText = buildText(payload);
+  }
+
+  /**
+   * Plain-text report for the clipboard.
+   *
+   * Deliberately assembled WITHOUT the token: the log tails are raw file
+   * content, and the main process redacts again on the way to the clipboard as
+   * a second line of defence. Never log or alert this string unredacted.
+   */
+  function buildText(payload) {
+    var report = payload.report;
+    var lines = ['DeepSeek Studio 自检报告 · ' + new Date(report.at).toISOString()];
+    lines.push('通过 ' + report.summary.ok + ' / 警告 ' + report.summary.warn +
+      ' / 失败 ' + report.summary.fail);
+    lines.push('');
+    for (var i = 0; i < report.checks.length; i++) {
+      var c = report.checks[i];
+      var tag = c.level === 'ok' ? '[OK]  ' : c.level === 'warn' ? '[WARN]' : '[FAIL]';
+      lines.push(tag + ' ' + c.label + '：' + c.detail);
+      if (c.hint) lines.push('       建议：' + c.hint);
+    }
+    lines.push('');
+    for (var j = 0; j < payload.logs.length; j++) {
+      var log = payload.logs[j];
+      lines.push('── ' + log.name + '.log (' + log.path + ')');
+      if (log.error) lines.push('   读取失败：' + log.error);
+      else for (var k = 0; k < log.lines.length; k++) lines.push('   ' + log.lines[k]);
+    }
+    return lines.join('\n');
+  }
+
+  function refresh() {
+    if (!api) { fatal('window.dshDiag 未定义：diagnostics-preload.js 没有执行。'); return; }
+    summaryBox.textContent = '收集中…';
+    api.report().then(render).catch(function (e) {
+      fatal('收集失败：' + String((e && e.message) || e));
+    });
+  }
+
+  document.getElementById('btn-refresh').onclick = refresh;
+
+  document.getElementById('btn-copy').onclick = function () {
+    if (!api) return;
+    if (!lastText) { toast('还没有可复制的内容'); return; }
+    api.copy(lastText).then(function (r) {
+      toast(r && r.ok ? '报告已复制到剪贴板' : '复制失败：' + ((r && r.error) || '未知错误'));
+    }).catch(function (e) { toast('复制失败：' + String((e && e.message) || e)); });
+  };
+
+  document.getElementById('btn-logs').onclick = function () {
+    if (!api) return;
+    api.openLogs().then(function (r) {
+      if (r && !r.ok) toast('打开失败：' + (r.error || '未知错误'));
+    }).catch(function () { toast('打开失败'); });
+  };
+
+  refresh();
+})();
+</script>
+</body>
+</html>

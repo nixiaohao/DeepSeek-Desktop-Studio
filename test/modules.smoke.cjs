@@ -28,6 +28,8 @@ const LIB = path.join(ROOT, 'lib-new')
 
 let pass = 0
 let fail = 0
+/** Last text handed to the clipboard stub; see the electron mock below. */
+let clipText = ''
 function ok(label) {
   pass++
   console.log(`  PASS  ${label}`)
@@ -195,7 +197,9 @@ const electronStub = {
   },
   ipcRenderer: { on: noop('ipcRenderer.on'), invoke: async () => null, send: noop('send'), removeListener: noop('removeListener') },
   contextBridge: { exposeInMainWorld: noop('exposeInMainWorld') },
-  clipboard: { writeText: noop('writeText') },
+  // Records what was written instead of discarding it, so diag:copy's redaction
+  // can be asserted on the ACTUAL text that would reach the OS clipboard.
+  clipboard: { writeText: (text) => { clipText = String(text) } },
   nativeImage: { createFromBuffer: () => ({}), createFromPath: () => ({}) },
   Tray: class {
     on = noop('tray.on')
@@ -220,6 +224,10 @@ const MODULES = [
   'health-monitor.js',
   'highlight.js',
   'approval-groups.js',
+  'diagnostics.js',
+  'diagnostics-host.js',
+  'diagnostics-preload.js',
+  'diagnostics-window.js',
   'external-editor.js',
   'preferences.js',
   'logging.js',
@@ -256,9 +264,90 @@ console.log('modules: pure modules carry no runtime dependencies')
  * someone drops the `type`, this fails immediately instead of the unit tests
  * mysteriously breaking.
  */
+/**
+ * Real `require("x")` calls in CODE, ignoring strings and comments.
+ *
+ * The previous implementation was a plain text scan
+ * (`/require\("([^"]+)"\)/g`) and produced a false positive the moment a
+ * module grew a user-facing hint that literally contains `require("electron")`
+ * inside a template literal — diagnostics.ts does exactly that. A text scan
+ * cannot tell a require from a sentence about require, so comments and
+ * string/template literals are blanked out before the scan.
+ *
+ * Template literal substitutions (`${...}`) are blanked along with the rest of
+ * the literal. That can only ever hide a require, and a require inside an
+ * interpolation is not a static dependency anyway.
+ */
+function requiresIn(src) {
+  const out = []
+  const n = src.length
+  let i = 0
+  while (i < n) {
+    const ch = src[i]
+    const next = src[i + 1]
+    if (ch === '/' && next === '/') {
+      while (i < n && src[i] !== '\n') i += 1
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      i += 2
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i += 1
+      i += 2
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch
+      i += 1
+      while (i < n) {
+        if (src[i] === '\\') { i += 2; continue }
+        if (src[i] === quote) { i += 1; break }
+        i += 1
+      }
+      continue
+    }
+    if (src.startsWith('require("', i)) {
+      const end = src.indexOf('")', i + 9)
+      if (end > 0) { out.push(src.slice(i + 9, end)); i = end + 2; continue }
+    }
+    i += 1
+  }
+  return out
+}
+
 function requiresOf(rel) {
-  const src = fs.readFileSync(path.join(LIB, rel), 'utf-8')
-  return [...src.matchAll(/require\("([^"]+)"\)/g)].map((m) => m[1])
+  return requiresIn(fs.readFileSync(path.join(LIB, rel), 'utf-8'))
+}
+
+// The scanner is hand-rolled, so it gets tested against itself. Without these
+// cases a bug in it would read as "every module is dependency-free".
+{
+  assert(
+    requiresIn('const a = require("node:fs")\n').join() === 'node:fs',
+    'requiresIn finds a plain require',
+    requiresIn('const a = require("node:fs")\n').join(),
+  )
+  const prose = 'toast(\'沙箱里只能 require("electron")，别的都不行\');\n'
+  assert(
+    requiresIn(prose).length === 0,
+    'requiresIn ignores the word require inside a string',
+    `it reported: ${requiresIn(prose).join(', ')}`,
+  )
+  assert(
+    requiresIn('// require("node:fs")\n').length === 0,
+    'requiresIn ignores a commented-out require',
+    'a line comment was scanned as code',
+  )
+  assert(
+    requiresIn('/* require("node:fs") */\n').length === 0,
+    'requiresIn ignores a block-commented require',
+    'a block comment was scanned as code',
+  )
+  const mixed = 'const a = require("node:fs")\nhint(`use require("electron") only`)\n'
+  assert(
+    requiresIn(mixed).join() === 'node:fs',
+    'requiresIn finds the real require next to a prose one',
+    requiresIn(mixed).join(),
+  )
 }
 
 {
@@ -287,6 +376,14 @@ function requiresOf(rel) {
   // electron or anything else, or the stream stops being testable in node.
   const deps = requiresOf('approval-groups.js')
   assert(deps.length === 0, 'approval-groups.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
+}
+{
+  // Same reason as health-monitor, plus a sharper one: the diagnostics report
+  // has to be assemblable from a window that cannot be shown, a preload that
+  // never loaded, and a backend that never started. Anything it imports at
+  // runtime is a thing that can fail before the report exists.
+  const deps = requiresOf('diagnostics.js')
+  assert(deps.length === 0, 'diagnostics.js requires nothing at runtime', `it now requires: ${deps.join(', ')}`)
 }
 
 // ── 3. Exported symbols other code depends on ──
@@ -320,6 +417,13 @@ const EXPECTED = [
   ['approval-groups.js', 'groupApprovals'],
   ['approval-groups.js', 'commonTool'],
   ['approval-groups.js', 'normalizeIds'],
+  ['diagnostics.js', 'buildReport'],
+  ['diagnostics.js', 'formatReport'],
+  ['diagnostics.js', 'tailLines'],
+  ['diagnostics-host.js', 'collectDiagnostics'],
+  ['diagnostics-host.js', 'LOG_NAMES'],
+  ['diagnostics-window.js', 'openDiagnosticsWindow'],
+  ['diagnostics-window.js', 'closeDiagnosticsWindow'],
   ['menu.js', 'setupMenu'],
 ]
 
@@ -552,11 +656,127 @@ async function checkBatchGuard() {
   }
 }
 
+/**
+ * The diagnostics channels, driven through the captured handlers.
+ *
+ * `diag:report` is the surface a user sees when the app looks broken, so two
+ * properties matter more than the shape of the payload: it must never reject
+ * (a rejected promise renders an empty window), and it must never carry the dsh
+ * launch token out of the process through `diag:copy`.
+ */
+async function checkDiagnosticsIpc() {
+  console.log('modules: diagnostics channels')
+
+  const fakeReports = []
+  const clip = []
+
+  const hostDeps = {
+    version: () => '0.0.0-smoke',
+    dsh: () => ({ version: 'dsh-test', port: 8321, channel: 'next' }),
+    workspace: () => 'D:/workspace',
+    health: () => ({
+      phase: 'ready',
+      lastLineTs: Date.now(),
+      exitCode: null,
+      recentErrors: 0,
+      restartCount: 0,
+      detail: '后端运行中',
+    }),
+    healthPhaseLabel: (p) => (p === 'ready' ? '就绪' : p),
+    window: () => ({ width: 1440, height: 900, visible: true }),
+    views: () => ({
+      panel: { readyAt: Date.now(), errors: [] },
+      statusbar: { readyAt: 0, errors: ['Error: module not found ./x.js'] },
+    }),
+    // Injected so this never touches the real log directory — and so the
+    // "unreadable log" path can be exercised on purpose.
+    readFile: (abs) => {
+      if (abs.includes('fatal')) throw new Error('ENOENT: no such file')
+      return Array.from({ length: 500 }, (_, i) => `line ${i}`).join('\n')
+    },
+    canWrite: () => true,
+  }
+
+  const teardown = registerIpc({
+    getWindowManager: () => null,
+    getHealthMonitor: () => null,
+    getAppVersion: () => '0.0.0-smoke',
+    restartBackend: async () => ({ ok: true }),
+    getStatusInfo: () => ({ version: 'x', port: null, channel: 'next' }),
+    quitApp: () => {},
+    getDiagnosticsHost: () => hostDeps,
+  })
+
+  try {
+    const report = ipcChannels.handlers.get('diag:report')
+    const copy = ipcChannels.handlers.get('diag:copy')
+
+    assert(typeof report === 'function', 'diag:report is registered', 'no handler captured')
+    assert(typeof copy === 'function', 'diag:copy is registered', 'no handler captured')
+    if (typeof report !== 'function' || typeof copy !== 'function') return
+
+    const payload = await report(null)
+
+    assert(
+      !payload.error,
+      'diag:report produces a report when the host is wired up',
+      `it failed: ${payload.error}`,
+    )
+    const checks = payload?.report?.checks ?? []
+    assert(checks.length > 0, 'the report carries checks', `got ${checks.length}`)
+    fakeReports.push(payload)
+
+    // The whole point of the ping: a view that never reported ready has to come
+    // back red, with the captured reason attached.
+    const statusbar = checks.find((c) => c.id === 'view-statusbar')
+    assert(statusbar?.level === 'fail', 'a view that never reported ready is a failure', JSON.stringify(statusbar))
+    assert(
+      String(statusbar?.detail).includes('module not found'),
+      'and the failure carries the captured preload error',
+      String(statusbar?.detail),
+    )
+    const panelCheck = checks.find((c) => c.id === 'view-panel')
+    assert(panelCheck?.level === 'ok', 'a view that reported ready passes', JSON.stringify(panelCheck))
+
+    assert(payload.logs?.length === 4, 'all four logs are attempted', `got ${payload.logs?.length}`)
+    const fatal = payload.logs.find((l) => l.name === 'fatal')
+    assert(!!fatal?.error, 'a log that cannot be read says so', 'the read error was swallowed')
+    const launcher = payload.logs.find((l) => l.name === 'launcher')
+    assert(
+      launcher?.lines?.length === 120,
+      'a readable log is truncated to the tail limit',
+      `got ${launcher?.lines?.length} lines`,
+    )
+    assert(
+      launcher.lines[launcher.lines.length - 1] === 'line 499',
+      'the tail ends at the last line, oldest first',
+      JSON.stringify(launcher.lines.slice(-2)),
+    )
+
+    // ── the safety property ──
+    const TOKEN = 'a'.repeat(64)
+    const leak = await copy(null, `report body token=${TOKEN} end`)
+    assert(leak.ok === true, 'diag:copy accepts a string')
+    clip.push(leak)
+    assert(
+      !String(clipText).includes(TOKEN),
+      'diag:copy redacts a token before it reaches the clipboard',
+      'a 64-hex token survived the copy — the launch token outlives the process once pasted',
+    )
+
+    assert((await copy(null, '')).ok === false, 'diag:copy refuses an empty string')
+    assert((await copy(null, null)).ok === false, 'diag:copy refuses a non-string')
+    assert((await copy(null, { a: 1 })).ok === false, 'diag:copy refuses an object')
+  } finally {
+    teardown()
+  }
+}
+
 function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
   // clean pass because nothing checked how much of the suite executed.
-  const MIN_ASSERTIONS = 60
+  const MIN_ASSERTIONS = 75
   assert(
     pass + fail >= MIN_ASSERTIONS,
     `the whole suite ran (at least ${MIN_ASSERTIONS} assertions)`,
@@ -567,8 +787,15 @@ function finalize() {
   if (fail > 0) process.exit(1)
 }
 
-checkBatchGuard().catch((err) => {
-  fail += 1
-  console.error(`  FAIL batch guard threw: ${err && err.message}`)
-}).then(finalize)
+checkBatchGuard()
+  .catch((err) => {
+    fail += 1
+    console.error(`  FAIL batch guard threw: ${err && err.message}`)
+  })
+  .then(checkDiagnosticsIpc)
+  .catch((err) => {
+    fail += 1
+    console.error(`  FAIL diagnostics ipc threw: ${err && err.message}`)
+  })
+  .then(finalize)
 
