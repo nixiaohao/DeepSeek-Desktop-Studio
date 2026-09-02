@@ -30,12 +30,25 @@
     --out: #cfd6e4;
     --ok: #3ddc84;
     --warn: #ffb454;
-    --font: 12px/1.5 "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+
+    /* Type scale. Every text rule below is a multiple of --fs-scale, which the
+       main process overrides (window-manager.applyUiScale) when the user picks
+       a size from the 视图 menu — one variable scales the whole surface.
+       The defaults sit ~2px above the old hard-coded 10/11px values, which the
+       user reported as straining to read; they are calc() rather than plain px
+       so the scale can be re-applied without touching 40 declarations. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --fs-xs: calc(11px * var(--fs-scale));
+    --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
   body {
-    background: var(--bg); color: var(--fg); font: var(--font);
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-mono); font-size: var(--fs-base); line-height: 1.5;
     display: flex; flex-direction: row; user-select: none;
   }
 
@@ -63,18 +76,20 @@
 
   section { display: flex; flex-direction: column; min-height: 0; }
   header {
-    flex: none; height: 26px; display: flex; align-items: center; gap: 8px;
+    /* 30px, not 26px: the header text is now --fs-md (13px) and a 26px bar
+       clipped the descenders of the CJK glyphs once line-height grew. */
+    flex: none; height: 30px; display: flex; align-items: center; gap: 8px;
     padding: 0 8px; background: var(--bg-2); border-bottom: 1px solid var(--border);
-    font-size: 11px; color: var(--fg-dim); white-space: nowrap;
+    font-size: var(--fs-md); color: var(--fg-dim); white-space: nowrap;
   }
   header .title { color: var(--fg); font-weight: 600; }
   header .spacer { flex: 1; }
-  header .hint { font-size: 10px; opacity: .7; }
+  header .hint { font-size: var(--fs-sm); opacity: .7; }
 
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
-    border-radius: 3px; padding: 1px 7px; font: var(--font); font-size: 11px;
-    cursor: pointer;
+    border-radius: 3px; padding: 2px 9px; cursor: pointer;
+    font-family: var(--font-mono); font-size: var(--fs-md); line-height: 1.4;
   }
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
@@ -82,7 +97,7 @@
   /* ── Changes area ── */
   #changes { flex: 1 1 auto; min-height: 80px; }
   #changes .body {
-    flex: 1; overflow: auto; padding: 6px; color: var(--fg-dim); font-size: 11px;
+    flex: 1; overflow: auto; padding: 6px; color: var(--fg-dim); font-size: var(--fs-md);
     user-select: text;
   }
 
@@ -98,7 +113,7 @@
   }
   .approval .head .tool { color: var(--warn); font-weight: 600; }
   .approval .head .spacer { flex: 1; }
-  .approval .reason { padding: 4px 7px; color: var(--fg-dim); font-size: 10px; }
+  .approval .reason { padding: 4px 7px; color: var(--fg-dim); font-size: var(--fs-sm); }
   .approval .files { padding: 0 7px 4px; }
   .approval .acts { display: flex; gap: 6px; padding: 0 7px 6px; }
   .approval .acts button { flex: 1; }
@@ -117,14 +132,14 @@
     margin: 4px 6px; padding: 5px 7px; border: 1px solid var(--border);
     border-radius: 4px; background: var(--bg-2);
   }
-  .batch .btitle { color: var(--fg-dim); font-size: 10px; margin-bottom: 5px; }
+  .batch .btitle { color: var(--fg-dim); font-size: var(--fs-sm); margin-bottom: 5px; }
   .batch .grow { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
   .batch .grow:last-child { margin-bottom: 0; }
   .batch .gname {
     flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: var(--warn);
   }
-  .batch button { flex: none; padding: 2px 8px; font-size: 10px; }
+  .batch button { flex: none; padding: 3px 10px; font-size: var(--fs-sm); }
   .batch button.allow { border-color: var(--ok); color: var(--ok); }
   .batch button.allow:hover { background: var(--ok); color: #10221a; }
   .batch button.deny { border-color: var(--err); color: var(--err); }
@@ -135,7 +150,7 @@
   .chg { border-bottom: 1px solid var(--border); }
   .chg:last-child { border-bottom: none; }
   .chg .row {
-    display: flex; align-items: center; gap: 6px; padding: 4px 6px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; padding: 5px 6px; cursor: pointer;
   }
   .chg .row:hover { background: rgba(76,141,255,.08); }
   .chg .dot { flex: none; width: 6px; height: 6px; border-radius: 50%; }
@@ -144,7 +159,7 @@
   .chg.rejected .dot { background: var(--err); }
   .chg .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chg.applied .title, .chg.rejected .title { opacity: .75; }
-  .chg .delta { flex: none; font-size: 10px; }
+  .chg .delta { flex: none; font-size: var(--fs-sm); }
   .chg .delta .add { color: var(--ok); }
   .chg .delta .del { color: var(--err); }
   .chg .detail { padding: 0 6px 6px 18px; display: none; }
@@ -152,9 +167,9 @@
   .chg .detail pre {
     margin-top: 4px; padding: 4px 6px; background: #101319; border: 1px solid var(--border);
     border-radius: 3px; max-height: 200px; overflow: auto; white-space: pre-wrap;
-    word-break: break-all; font-size: 10px; color: var(--out);
+    word-break: break-all; font-size: var(--fs-sm); color: var(--out);
   }
-  .chg .detail .note { color: #5d6377; font-size: 10px; }
+  .chg .detail .note { color: #5d6377; font-size: var(--fs-sm); }
   .chg .detail .tools { display: flex; gap: 6px; margin-top: 4px; }
 
   /* ── syntax tokens ──────────────────────────────────────────────────
@@ -189,19 +204,19 @@
   a.path { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); cursor: pointer; }
   a.path:hover { background: rgba(76,141,255,.15); }
 
-  .empty { color: #5d6377; padding: 8px; font-size: 11px; }
+  .empty { color: #5d6377; padding: 8px; font-size: var(--fs-md); }
 
-  label.chk { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; cursor: pointer; }
+  label.chk { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-md); cursor: pointer; }
   label.chk input { margin: 0; }
 
   /* ── Path context menu ── */
   #path-menu {
     position: fixed; display: none; z-index: 50; background: #22262f;
     border: 1px solid var(--border); border-radius: 4px; padding: 3px;
-    box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 180px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 210px;
   }
   #path-menu .path-text {
-    padding: 4px 8px; font-size: 10px; color: var(--fg-dim);
+    padding: 5px 9px; font-size: var(--fs-sm); color: var(--fg-dim);
     border-bottom: 1px solid var(--border); margin-bottom: 3px;
     word-break: break-all; user-select: text;
   }
@@ -213,7 +228,7 @@
 
   #toast {
     position: fixed; left: 8px; bottom: 8px; background: #22262f; border: 1px solid var(--border);
-    border-radius: 4px; padding: 6px 10px; font-size: 11px; display: none; z-index: 60;
+    border-radius: 4px; padding: 6px 10px; font-size: var(--fs-md); display: none; z-index: 60;
     max-width: calc(100% - 16px); word-break: break-all;
   }
   #toast.err { border-color: var(--err); color: var(--err); }

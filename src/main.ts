@@ -779,6 +779,7 @@ function buildMenuActions(): MenuActions {
         panel: p.visible,
         statusBar: p.statusVisible,
         sidebar: p.sidebarVisible,
+        uiScale: p.uiScale,
       }
     },
     toggleSidebar: () => {
@@ -792,6 +793,12 @@ function buildMenuActions(): MenuActions {
     toggleStatusBar: () => {
       const next = !(windowManager?.panelPrefs.statusVisible ?? loadPanelPrefs().statusVisible)
       windowManager?.setStatusVisible(next)
+      rebuildMenu()
+    },
+    setUiScale: (scale) => {
+      windowManager?.setUiScale(scale)
+      // Rebuilt so the radio mark moves; the pages themselves are re-injected
+      // by setUiScale(), no reload needed.
       rebuildMenu()
     },
 

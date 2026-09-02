@@ -27,8 +27,14 @@
  * viewport the page lays itself out in.
  */
 
-/** Height of the bottom status bar, px. */
-export const STATUS_BAR_HEIGHT = 26
+/**
+ * Height of the bottom status bar, px.
+ *
+ * 28, not 26: the bar's text runs at --fs-md (13px, see statusbar.html) with a
+ * 1.45 line-height, which needs ~19px of text box; 26px left the buttons
+ * touching the divider. Keep in sync with the shell's type scale.
+ */
+export const STATUS_BAR_HEIGHT = 28
 /** Draggable width limits for the right panel, px. */
 export const PANEL_MIN_WIDTH = 240
 export const PANEL_MAX_WIDTH = 720

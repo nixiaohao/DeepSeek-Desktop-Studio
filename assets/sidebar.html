@@ -22,12 +22,22 @@
     --err: #ff6b6b;
     --ok: #3ddc84;
     --warn: #ffb454;
-    --font: 12px/1.5 "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+
+    /* Type scale — see panel.html for why these are calc() multiples of
+       --fs-scale rather than plain px. The main process overrides --fs-scale
+       when the user changes the panel font size from the 视图 menu. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --fs-xs: calc(11px * var(--fs-scale));
+    --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
   body {
-    background: var(--bg); color: var(--fg); font: var(--font);
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-mono); font-size: var(--fs-base); line-height: 1.5;
     display: flex; flex-direction: row; user-select: none;
   }
 
@@ -53,9 +63,10 @@
   #app { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
   header {
-    flex: none; height: 26px; display: flex; align-items: center; gap: 6px;
+    /* 30px: see panel.html — 26px clipped the larger CJK glyphs. */
+    flex: none; height: 30px; display: flex; align-items: center; gap: 6px;
     padding: 0 6px; background: var(--bg-2); border-bottom: 1px solid var(--border);
-    font-size: 11px; color: var(--fg-dim); white-space: nowrap;
+    font-size: var(--fs-md); color: var(--fg-dim); white-space: nowrap;
   }
   header .title {
     color: var(--fg); font-weight: 600; overflow: hidden;
@@ -63,28 +74,28 @@
   }
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
-    border-radius: 3px; padding: 1px 6px; font: var(--font); font-size: 11px;
-    cursor: pointer; flex: none;
+    border-radius: 3px; padding: 2px 8px; cursor: pointer; flex: none;
+    font-family: var(--font-mono); font-size: var(--fs-md); line-height: 1.4;
   }
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
 
   /* ── git strip ── */
   #git {
-    flex: none; padding: 5px 7px; background: var(--bg-2);
-    border-bottom: 1px solid var(--border); font-size: 11px; color: var(--fg-dim);
+    flex: none; padding: 6px 8px; background: var(--bg-2);
+    border-bottom: 1px solid var(--border); font-size: var(--fs-md); color: var(--fg-dim);
   }
   #git .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   #branch {
     color: var(--fg); background: var(--bg-3); border: 1px solid var(--border);
-    border-radius: 9px; padding: 0 7px; font-size: 10px;
+    border-radius: 9px; padding: 1px 8px; font-size: var(--fs-sm);
   }
   #counts span { margin-right: 7px; }
   #counts .staged { color: var(--ok); }
   #counts .unstaged { color: var(--warn); }
   #counts .untracked { color: var(--accent); }
   #counts .conflicted { color: var(--err); }
-  .note { margin-top: 4px; font-size: 10px; line-height: 1.45; white-space: normal; }
+  .note { margin-top: 4px; font-size: var(--fs-sm); line-height: 1.45; white-space: normal; }
   .note.warn { color: var(--warn); }
   .note.err { color: var(--err); }
 
@@ -92,20 +103,20 @@
   #changedWrap { flex: none; max-height: 34%; display: flex; flex-direction: column; min-height: 0; }
   #changed { overflow: auto; padding: 3px 0; }
   .sec-title {
-    padding: 3px 7px; font-size: 10px; color: var(--fg-dim);
+    padding: 4px 8px; font-size: var(--fs-sm); color: var(--fg-dim);
     background: var(--bg-2); border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 6px;
   }
   .file {
-    display: flex; align-items: center; gap: 5px; padding: 1px 7px;
-    cursor: pointer; white-space: nowrap; font-size: 11px;
+    display: flex; align-items: center; gap: 5px; padding: 2px 7px;
+    cursor: pointer; white-space: nowrap; font-size: var(--fs-md);
     user-select: text;
   }
   .file:hover { background: var(--bg-3); }
   .file.on { background: rgba(76,141,255,.16); }
-  .file .b { flex: none; width: 12px; text-align: center; font-weight: 700; }
+  .file .b { flex: none; width: 14px; text-align: center; font-weight: 700; }
   .file .n { overflow: hidden; text-overflow: ellipsis; }
-  .file .d { color: var(--fg-dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+  .file .d { color: var(--fg-dim); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; }
   .b.M, .b.\! { color: var(--warn); }
   .b.\? { color: var(--accent); }
   .b.\● { color: var(--ok); }
@@ -114,7 +125,7 @@
   #diffWrap { flex: 1 1 40%; display: none; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
   #diffWrap.on { display: flex; }
   #diff {
-    flex: 1; overflow: auto; padding: 5px 7px; font-size: 11px;
+    flex: 1; overflow: auto; padding: 5px 7px; font-size: var(--fs-md);
     white-space: pre; user-select: text; color: var(--fg-dim);
   }
   #diff .add { color: var(--ok); }
@@ -136,26 +147,28 @@
   #treeWrap { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
   #tree { flex: 1; overflow: auto; padding: 3px 0; }
   #tree .row {
-    display: flex; align-items: center; gap: 4px; padding: 1px 5px;
-    cursor: pointer; white-space: nowrap; font-size: 11px;
+    display: flex; align-items: center; gap: 4px; padding: 2px 5px;
+    cursor: pointer; white-space: nowrap; font-size: var(--fs-md);
   }
   #tree .row:hover { background: var(--bg-3); }
-  #tree .tri { flex: none; width: 11px; text-align: center; color: var(--fg-dim); font-size: 9px; }
-  #tree .ic { flex: none; width: 13px; text-align: center; opacity: .8; }
+  /* 13px/15px, not 11px/13px: the twisty and the file icon were sized for the
+     old 9px/11px text and now sit visually cramped against it. */
+  #tree .tri { flex: none; width: 13px; text-align: center; color: var(--fg-dim); font-size: var(--fs-xs); }
+  #tree .ic { flex: none; width: 15px; text-align: center; opacity: .8; }
   #tree .nm { overflow: hidden; text-overflow: ellipsis; }
-  #tree .bg { flex: none; margin-left: 4px; font-weight: 700; font-size: 10px; }
+  #tree .bg { flex: none; margin-left: 4px; font-weight: 700; font-size: var(--fs-sm); }
   #tree .bg.M, #tree .bg.\! { color: var(--warn); }
   #tree .bg.\? { color: var(--accent); }
   #tree .bg.\● { color: var(--ok); }
   #tree .dir { color: var(--accent); }
   #tree .row.dirty .nm { color: var(--warn); }
 
-  .empty { padding: 10px 8px; color: var(--fg-dim); font-size: 11px; line-height: 1.6; }
-  .empty code { color: var(--fg); font-size: 10px; }
+  .empty { padding: 10px 8px; color: var(--fg-dim); font-size: var(--fs-md); line-height: 1.6; }
+  .empty code { color: var(--fg); font-size: var(--fs-sm); }
 
   /* ── footer hints ── */
   #foot {
-    flex: none; padding: 3px 7px; font-size: 10px; color: var(--fg-dim);
+    flex: none; padding: 4px 8px; font-size: var(--fs-sm); color: var(--fg-dim);
     background: var(--bg-2); border-top: 1px solid var(--border);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
@@ -165,14 +178,14 @@
   #toast {
     position: fixed; left: 6px; bottom: 6px; right: 10px; padding: 4px 7px;
     background: #2a2f3b; border: 1px solid var(--border); border-radius: 3px;
-    font-size: 10px; color: var(--fg); display: none; z-index: 20;
+    font-size: var(--fs-sm); color: var(--fg); display: none; z-index: 20;
   }
   #toast.err { border-color: var(--err); color: var(--err); }
   #menu {
     position: fixed; display: none; z-index: 30; background: #22262f;
-    border: 1px solid var(--border); border-radius: 3px; padding: 2px; min-width: 130px;
+    border: 1px solid var(--border);     border-radius: 3px; padding: 2px; min-width: 160px;
   }
-  #menu div { padding: 3px 9px; font-size: 11px; cursor: pointer; }
+  #menu div { padding: 4px 10px; font-size: var(--fs-md); cursor: pointer; }
   #menu div:hover { background: var(--accent); color: #fff; }
 </style>
 </head>

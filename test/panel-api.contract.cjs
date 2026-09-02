@@ -438,6 +438,80 @@ for (const asset of RESIZER_PAGES) {
   )
 }
 
+// ── 3c. Panel type scale ──
+
+/**
+ * The user reported the shell's own surfaces as too small to read (10–11px
+ * body text). Every one of these pages now derives its font sizes from four
+ * `--fs-*` tokens, so the size can be changed globally by overriding a single
+ * variable (`--fs-scale`) from the main process — see src/ui-scale.ts.
+ *
+ * A hard-coded px font-size in any of them is a REGRESSION, not a style
+ * choice: it silently drops out of the global scaling, so the user's menu
+ * selection would resize most of the text while that one rule stays put.
+ *
+ * This page list is explicit rather than derived from BRIDGES: diagnostics.html
+ * has its own preload and no dshPanel bridge, so it is not in ALL_PAGES, but it
+ * shares the type scale and must obey the same rule.
+ */
+console.log('panel-api: panel type scale')
+
+const TYPE_SCALE_PAGES = [
+  path.join('assets', 'panel.html'),
+  path.join('assets', 'sidebar.html'),
+  path.join('assets', 'statusbar.html'),
+  path.join('assets', 'diagnostics.html'),
+]
+
+for (const asset of TYPE_SCALE_PAGES) {
+  const html = read(asset)
+  // Strip comments first: these files carry long prose that quotes the very
+  // declarations under test (e.g. "the old 11px"), which would otherwise read
+  // as a hard-coded font size.
+  const style = /<style>([\s\S]*?)<\/style>/.exec(html)
+  assert(style !== null, `${asset} has a <style> block`, `${asset} has no inline <style> — the type scale cannot live anywhere else`)
+  if (!style) continue
+  const css = style[1].replace(/\/\*[\s\S]*?\*\//g, '')
+
+  assert(
+    /--fs-scale:\s*1\s*;/.test(css),
+    `${asset}: :root declares the --fs-scale default`,
+    `${asset} does not declare --fs-scale: 1 — the main process's override (ui-scale.ts) would be the only declaration, and a page without a fallback renders unscaled`
+  )
+  // The scale is only useful if the tokens are actually expressed in terms of
+  // it; a plain `--fs-md: 13px` would look identical and be unscalable.
+  for (const token of ['--fs-base', '--fs-md']) {
+    const decl = new RegExp(`${token}:\\s*calc\\(([0-9.]+)px\\s*\\*\\s*var\\(--fs-scale\\)\\)`).exec(css)
+    assert(
+      decl !== null,
+      `${asset}: ${token} is a calc() multiple of --fs-scale`,
+      `${asset} defines ${token} without var(--fs-scale) — the font-size menu would not affect it`
+    )
+    if (!decl) continue
+    assert(
+      Number(decl[1]) >= 12,
+      `${asset}: ${token} baseline is at least 12px`,
+      `${asset} ${token} baseline is ${decl[1]}px — the reported problem was 10–11px text; do not go back below 12`
+    )
+  }
+
+  // No hard-coded font sizes anywhere in the stylesheet.
+  const hardCoded = [...css.matchAll(/font-size:\s*([0-9.]+)px/g)].map((m) => m[1])
+  assert(
+    hardCoded.length === 0,
+    `${asset}: no hard-coded px font-size`,
+    `${asset} has hard-coded font-size ${hardCoded.join(', ')}px — it would ignore the 面板字号 setting`
+  )
+  // The `font:` shorthand bakes a size in too, and it was how the old 12px
+  // body text was written before this change.
+  const shorthand = [...css.matchAll(/font:\s*(?:[0-9.]+px|var\(--font\))/g)].map((m) => m[0])
+  assert(
+    shorthand.length === 0,
+    `${asset}: no px-bearing font shorthand`,
+    `${asset} uses the font shorthand (${shorthand.join(', ')}) — split into font-family/font-size/line-height so it scales`
+  )
+}
+
 // ── 4. Every inline script must actually parse ──
 
 console.log('panel-api: inline script syntax')

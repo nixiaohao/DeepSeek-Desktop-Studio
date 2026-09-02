@@ -5,7 +5,7 @@
 import { app, dialog, Menu, shell, type MenuItemConstructorOptions } from 'electron'
 import { relaunchApp } from './relaunch.js'
 import { CHANNELS, normalizeChannel, type ChannelId } from './channels.js'
-import { loadPreferences } from './preferences.js'
+import { UI_SCALES, loadPreferences, uiScaleLabel, type UiScale } from './preferences.js'
 
 /**
  * Everything the menu can do.
@@ -28,10 +28,14 @@ export interface MenuActions {
     panel: boolean
     statusBar: boolean
     sidebar: boolean
+    /** Panel font size multiplier — one of UI_SCALES. */
+    uiScale: UiScale
   }
   togglePanel: () => void
   toggleStatusBar: () => void
   toggleSidebar: () => void
+  /** Resize the shell's fonts. The menu is rebuilt afterwards to re-mark it. */
+  setUiScale: (scale: UiScale) => void
 
   // ── backend ──
   restartBackend: () => void
@@ -120,6 +124,20 @@ export function setupMenu(actions: MenuActions): void {
           type: 'checkbox',
           checked: panel.statusBar,
           click: () => actions.toggleStatusBar(),
+        },
+        { type: 'separator' },
+        // ── panel font size ──
+        // Radio group, not a checkbox: it selects one of four discrete steps,
+        // and a radio is the only control that shows "which one is active"
+        // without the user opening the menu and reading the labels.
+        {
+          label: '面板字号',
+          submenu: UI_SCALES.map<MenuItemConstructorOptions>((s) => ({
+            label: uiScaleLabel(s),
+            type: 'radio',
+            checked: panel.uiScale === s,
+            click: () => actions.setUiScale(s),
+          })),
         },
         { type: 'separator' },
         {

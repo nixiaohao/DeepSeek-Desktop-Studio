@@ -10,6 +10,53 @@ import { recoveryGuide, type ChannelId } from './channels.js'
 // loadable in pure-node contexts (tests).
 import type { EditorConfig } from './external-editor.js'
 
+/**
+ * Panel font size steps, as multipliers on the `--fs-scale` CSS variable that
+ * every shell page derives its type scale from (see panel.html).
+ *
+ * The shell does NOT use `setZoomFactor`: that scales the page's own layout
+ * too, so a 1.3 zoom would push the resizer, the drag handles and the
+ * fixed-height headers out of alignment with the window. Scaling only the
+ * font variables leaves the geometry untouched.
+ *
+ * Ordered smallest → largest; `UI_SCALES[1]` (1) is the default.
+ */
+export const UI_SCALES = [0.85, 1, 1.15, 1.3] as const
+export type UiScale = (typeof UI_SCALES)[number]
+
+/** Menu labels for the steps above, same order. */
+const UI_SCALE_LABELS: Record<UiScale, string> = {
+  0.85: '更小',
+  1: '标准',
+  1.15: '较大',
+  1.3: '特大',
+}
+
+/**
+ * Coerce whatever is in the prefs file into a supported step.
+ *
+ * The file is hand-editable JSON, and an out-of-range value (or a string, or
+ * `null`) would otherwise be interpolated straight into the injected CSS —
+ * `--fs-scale: 0` renders every panel blank, which is indistinguishable from
+ * a crash. Nearest legal step is used so an unusual hand-typed value still
+ * lands on something readable.
+ */
+export function normalizeUiScale(value: unknown): UiScale {
+  const n = typeof value === 'number' && Number.isFinite(value) ? value : 1
+  let best: UiScale = 1
+  let bestDist = Infinity
+  for (const s of UI_SCALES) {
+    const d = Math.abs(s - n)
+    if (d < bestDist) { bestDist = d; best = s }
+  }
+  return best
+}
+
+/** Human-readable label for a scale step, used by the 视图 menu. */
+export function uiScaleLabel(scale: UiScale): string {
+  return UI_SCALE_LABELS[scale] ?? '标准'
+}
+
 /** Geometry + visibility of the overlay panel and status bar. */
 export interface PanelPrefs {
   /** Right-hand panel shown at all. */
@@ -24,6 +71,11 @@ export interface PanelPrefs {
   sidebarVisible: boolean
   /** Sidebar width in px. */
   sidebarWidth: number
+  /**
+   * Multiplier on the shell's font size (one of UI_SCALES). Applied by
+   * injecting `--fs-scale` into every shell page, not by zooming the views.
+   */
+  uiScale: UiScale
 }
 
 interface Preferences {
@@ -82,6 +134,11 @@ export const DEFAULT_PANEL_PREFS: PanelPrefs = {
   // status badge without dominating a 1280-wide window.
   sidebarVisible: true,
   sidebarWidth: 240,
+  // Baseline for the enlarged type scale (13px body, was 11px). The 0.85/1.15/
+  // 1.3 steps let the user tune it without a rebuild — the previous fixed
+  // 10–11px was reported as too small to read, and "how small is too small" is
+  // exactly the kind of thing worth leaving to the person looking at it.
+  uiScale: 1,
 }
 
 const DEFAULTS: Preferences = {
@@ -153,6 +210,7 @@ export function loadPanelPrefs(): PanelPrefs {
     width: num(merged.width, DEFAULT_PANEL_PREFS.width),
     monitorHeight: num(merged.monitorHeight, DEFAULT_PANEL_PREFS.monitorHeight),
     sidebarWidth: num(merged.sidebarWidth, DEFAULT_PANEL_PREFS.sidebarWidth),
+    uiScale: normalizeUiScale(merged.uiScale),
   }
 }
 

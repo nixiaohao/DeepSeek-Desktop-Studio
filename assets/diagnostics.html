@@ -26,12 +26,22 @@
     --err: #ff6b6b;
     --ok: #3ddc84;
     --warn: #ffb454;
-    --font: 12px/1.6 "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+
+    /* Type scale — see panel.html. Diagnostics is a standalone window, so the
+       main process injects the same --fs-scale override here; the page must
+       therefore use the identical token names. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --fs-xs: calc(11px * var(--fs-scale));
+    --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    background: var(--bg); color: var(--fg); font: var(--font);
+    background: var(--bg); color: var(--fg);
+    font-family: var(--font-mono); font-size: var(--fs-base); line-height: 1.6;
     display: flex; flex-direction: column; overflow: hidden;
   }
 
@@ -41,7 +51,7 @@
   }
   header .title { font-weight: 600; }
   header .spacer { flex: 1; }
-  header .summary { font-size: 11px; color: var(--fg-dim); }
+  header .summary { font-size: var(--fs-md); color: var(--fg-dim); }
   header .summary b { font-weight: 600; }
   header .summary .f { color: var(--err); }
   header .summary .w { color: var(--warn); }
@@ -49,8 +59,8 @@
 
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
-    border-radius: 3px; padding: 3px 10px; font: var(--font); font-size: 11px;
-    cursor: pointer;
+    border-radius: 3px; padding: 4px 12px; cursor: pointer;
+    font-family: var(--font-mono); font-size: var(--fs-md); line-height: 1.4;
   }
   button:hover { border-color: var(--accent); color: var(--accent); }
   button:disabled { opacity: .5; cursor: default; }
@@ -61,7 +71,7 @@
   #body::-webkit-scrollbar-thumb { background: #2f3441; border-radius: 5px; }
 
   h2 {
-    font-size: 11px; font-weight: 600; color: var(--fg-dim); text-transform: none;
+    font-size: var(--fs-md); font-weight: 600; color: var(--fg-dim); text-transform: none;
     margin: 14px 0 6px; padding-bottom: 3px; border-bottom: 1px solid var(--border);
   }
   h2:first-child { margin-top: 0; }
@@ -71,10 +81,12 @@
     border-left: 2px solid transparent; align-items: flex-start;
   }
   .row + .row { margin-top: 2px; }
-  .row .tag { flex: none; width: 46px; font-size: 10px; padding-top: 1px; }
-  .row .label { flex: none; width: 96px; color: var(--fg); }
+  /* 54px/112px, not 46px/96px: the columns were measured against the old
+     11px text; at 13.5px the labels wrapped mid-word. */
+  .row .tag { flex: none; width: 54px; font-size: var(--fs-sm); padding-top: 2px; }
+  .row .label { flex: none; width: 112px; color: var(--fg); }
   .row .detail { flex: 1; min-width: 0; color: var(--fg-dim); word-break: break-all; }
-  .row .hint { flex-basis: 100%; padding-left: 54px; color: var(--fg-dim); font-size: 11px; opacity: .85; }
+  .row .hint { flex-basis: 100%; padding-left: 62px; color: var(--fg-dim); font-size: var(--fs-md); opacity: .85; }
 
   .row.ok { border-left-color: var(--ok); }
   .row.ok .tag { color: var(--ok); }
@@ -86,7 +98,7 @@
 
   details { margin-top: 6px; }
   details > summary {
-    cursor: pointer; padding: 3px 6px; color: var(--fg-dim); font-size: 11px;
+    cursor: pointer; padding: 3px 6px; color: var(--fg-dim); font-size: var(--fs-md);
     border-left: 2px solid var(--border); list-style: none;
   }
   details > summary::-webkit-details-marker { display: none; }
@@ -95,11 +107,11 @@
   .log {
     background: var(--bg-2); border: 1px solid var(--border); border-radius: 3px;
     padding: 6px 8px; margin-top: 4px; max-height: 260px; overflow: auto;
-    white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--out);
+    white-space: pre-wrap; word-break: break-all; font-size: var(--fs-md); color: var(--out);
     user-select: text;
   }
   .log .empty { color: var(--fg-dim); font-style: normal; }
-  .path { color: var(--fg-dim); font-size: 10px; word-break: break-all; margin-top: 2px; }
+  .path { color: var(--fg-dim); font-size: var(--fs-sm); word-break: break-all; margin-top: 2px; }
 
   #fatal {
     margin: 10px 12px; padding: 10px 12px; border: 1px solid var(--err);
@@ -108,7 +120,7 @@
   #toast {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
     background: var(--bg-2); border: 1px solid var(--border); color: var(--fg);
-    border-radius: 4px; padding: 5px 12px; font-size: 11px; opacity: 0;
+    border-radius: 4px; padding: 5px 12px; font-size: var(--fs-md); opacity: 0;
     transition: opacity .18s; pointer-events: none;
   }
   #toast.show { opacity: 1; }

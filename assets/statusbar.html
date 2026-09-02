@@ -15,12 +15,20 @@
     --fg: #d6dae3;
     --dim: #8b93a7;
     --accent: #4c8dff;
+    /* Type scale — see panel.html. The bar tracks --fs-md so it grows and
+       shrinks with the rest of the shell instead of staying at the old 11px
+       while everything around it was enlarged. */
+    --fs-scale: 1;
+    --fs-base: calc(13.5px * var(--fs-scale));
+    --fs-md: calc(13px * var(--fs-scale));
+    --fs-sm: calc(12px * var(--fs-scale));
+    --font-sans: "Segoe UI", "Microsoft YaHei", sans-serif;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
   body {
     background: var(--bg); color: var(--fg);
-    font: 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-family: var(--font-sans); font-size: var(--fs-md); line-height: 1.45;
     border-top: 1px solid var(--border);
     user-select: none;
   }
@@ -28,7 +36,7 @@
     height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 8px;
   }
   #dot {
-    width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none;
+    width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none;
   }
   #phase { font-weight: 600; }
   #detail {
@@ -41,7 +49,8 @@
   #meta { color: var(--dim); white-space: nowrap; }
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
-    border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+    border-radius: 3px; padding: 2px 10px; font-size: var(--fs-md); cursor: pointer;
+    font-family: var(--font-sans);
   }
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }

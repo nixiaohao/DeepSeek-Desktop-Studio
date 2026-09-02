@@ -230,6 +230,7 @@ const MODULES = [
   'diagnostics-window.js',
   'dsh-input.js',
   'layout-geometry.js',
+  'ui-scale.js',
   'external-editor.js',
   'preferences.js',
   'logging.js',
@@ -843,10 +844,28 @@ async function checkLayoutPolicy() {
     'window-manager: no CSS padding is injected into the dsh page',
     'window-manager.js injects CSS padding again — padding does not move the page viewport, which is what caused the blank strip'
   )
+  // 2b. Nothing is injected into the dsh page specifically.
+  //
+  // The ban is on the PAGE, not on insertCSS as a word: the shell legitimately
+  // injects `--fs-scale` into its OWN overlay views (bindUiScale / applyUiScale,
+  // see ui-scale.ts) and that must not trip this. What must never come back is
+  // styling a page we do not own — padding injection is exactly the bug this
+  // three-column layout replaced.
+  for (const target of ['pageContents', 'contentView', 'this.win.webContents']) {
+    const re = new RegExp(`${target.replace('.', '\\.')}[\\s\\S]{0,40}insertCSS`)
+    assert(
+      !re.test(code),
+      `window-manager: nothing is injected into ${target}`,
+      `window-manager.js injects CSS into ${target} — the dsh page is not ours to style`
+    )
+  }
+  // 2c. …and the font scale IS applied to our own overlays. Without it the
+  // 面板字号 menu does nothing, which is the failure the user would report next.
   assert(
-    !/insertCSS/.test(code),
-    'window-manager: nothing is injected into the page any more',
-    'window-manager.js calls insertCSS — the page is not ours to style'
+    /insertCSS\(\s*\(0,\s*ui_scale_js_1\.uiScaleCss\)/.test(code) ||
+      /insertCSS\(uiScaleCss\(/.test(code),
+    'window-manager: the overlay views get the --fs-scale override',
+    'window-manager.js no longer injects uiScaleCss into its views — the 面板字号 menu would silently do nothing'
   )
 
   // 3. Z-order: contentView children paint in insertion order, so the page

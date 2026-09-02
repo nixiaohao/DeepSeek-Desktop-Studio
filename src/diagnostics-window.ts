@@ -20,6 +20,8 @@
  */
 import { BrowserWindow, app } from 'electron'
 import { join } from 'node:path'
+import { loadPanelPrefs } from './preferences.js'
+import { uiScaleCss } from './ui-scale.js'
 
 let win: BrowserWindow | null = null
 
@@ -65,6 +67,17 @@ export function openDiagnosticsWindow(): BrowserWindow | null {
   win.on('closed', () => {
     win = null
   })
+
+  // Match the panel font size the user chose. Everything on this page is ours,
+  // but the type scale still has to follow the shell's setting or the report
+  // would come out at the default size while every other surface is enlarged.
+  const css = uiScaleCss(loadPanelPrefs().uiScale)
+  const applyScale = (): void => {
+    if (!win || win.isDestroyed()) return
+    void win.webContents.insertCSS(css).catch(() => {})
+  }
+  win.webContents.on('did-finish-load', applyScale)
+  applyScale()
 
   void win.loadFile(join(app.getAppPath(), 'assets', 'diagnostics.html'))
   return win

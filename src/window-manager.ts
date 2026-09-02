@@ -37,10 +37,18 @@
  *     overlays or it paints on top of them.
  *  2. Child view bounds are absolute and are NOT auto-updated on window
  *     resize, so every geometry change must go through layout().
+ *
+ * FONT SIZE
+ * ---------
+ * The shell pages get their type scale from `--fs-scale`, which the main
+ * process overrides with insertCSS (see ui-scale.ts). The overlay views are
+ * injected on creation AND on every did-finish-load, because insertCSS does not
+ * survive a navigation; setUiScale() re-injects into the live views.
  */
 import { app, BrowserWindow, WebContentsView, type WebContents } from 'electron'
 import { join } from 'node:path'
-import { loadPanelPrefs, savePanelPrefs, type PanelPrefs } from './preferences.js'
+import { loadPanelPrefs, savePanelPrefs, type PanelPrefs, type UiScale } from './preferences.js'
+import { uiScaleCss } from './ui-scale.js'
 import { log } from './logging.js'
 import type { ViewState } from './diagnostics.js'
 import {
@@ -208,6 +216,46 @@ export class WindowManager {
   }
 
   /**
+   * Keep one view's font scale applied across its whole lifetime.
+   *
+   * The first insertCSS is best-effort and may land before the document exists
+   * (loadFile is async); the did-finish-load handler is the one that reliably
+   * takes effect, and it also covers any later reload.
+   */
+  private bindUiScale(view: WebContentsView): void {
+    const apply = (): void => {
+      void view.webContents.insertCSS(uiScaleCss(this.prefs.uiScale)).catch(() => {})
+    }
+    apply()
+    view.webContents.on('did-finish-load', apply)
+  }
+
+  /** Re-apply the font scale to every live shell view. */
+  private applyUiScaleNow(): void {
+    const css = uiScaleCss(this.prefs.uiScale)
+    for (const view of [this.panelView, this.statusView, this.sidebarView]) {
+      if (!view || view.webContents.isDestroyed()) continue
+      void view.webContents.insertCSS(css).catch(() => {})
+    }
+  }
+
+  /**
+   * Change the panel font size (one of UI_SCALES).
+   *
+   * The value is normalised on read (preferences.normalizeUiScale) as well as
+   * on load, so a hand-edited prefs file cannot blank the panels out.
+   */
+  setUiScale(scale: UiScale): void {
+    this.prefs = { ...this.prefs, uiScale: scale }
+    savePanelPrefs({ uiScale: scale })
+    this.applyUiScaleNow()
+  }
+
+  get uiScale(): UiScale {
+    return this.prefs.uiScale
+  }
+
+  /**
    * Create the overlay views and start tracking geometry.
    * Safe to call once per window.
    */
@@ -279,6 +327,14 @@ export class WindowManager {
     this.viewState.set('panel', { readyAt: 0, errors: [] })
     this.viewState.set('statusbar', { readyAt: 0, errors: [] })
     this.viewState.set('sidebar', { readyAt: 0, errors: [] })
+
+    // Font scaling. Registered per view, not once globally: insertCSS is
+    // per-WebContents and does not survive a navigation, so each view re-applies
+    // its own copy on reload. See ui-scale.ts for why this is CSS and not zoom.
+    for (const view of [this.panelView, this.statusView, this.sidebarView]) {
+      if (!view) continue
+      this.bindUiScale(view)
+    }
 
     // Catch preload failures. Electron emits this when the script throws OR
     // never finishes loading. Without it the user sees only a dead "preload 未
