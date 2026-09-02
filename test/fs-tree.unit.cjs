@@ -323,7 +323,22 @@ console.log('fs-tree: tree flattening')
     [true, false]
   )
 
+  check(
+    'nothing is expanded when the set is empty',
+    buildTreeRows(base).rows.map((r) => r.expanded),
+    [false, false]
+  )
+
   const open = buildTreeRows({ ...base, expanded: new Set(['/r/src']) })
+  // The renderer needs this to point the disclosure triangle the right way.
+  // Deriving it from the next row's depth breaks on the last row.
+  check('the open folder is flagged, its siblings are not', open.rows.map((r) => r.expanded), [
+    true,
+    false,
+    false,
+    false,
+  ])
+  check('a file is never flagged expanded', open.rows[1].expanded, false)
   check('an expanded folder appends its children', open.rows.map((r) => r.name), [
     'src',
     'a.ts',

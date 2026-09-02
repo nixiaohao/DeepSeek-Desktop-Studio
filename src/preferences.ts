@@ -30,6 +30,10 @@ export interface PanelPrefs {
    * build, the user can switch it off from the menu and get plain overlay.
    */
   avoidCss: boolean
+  /** Left file/git sidebar shown at all. */
+  sidebarVisible: boolean
+  /** Sidebar width in px. */
+  sidebarWidth: number
 }
 
 interface Preferences {
@@ -79,6 +83,10 @@ export const DEFAULT_PANEL_PREFS: PanelPrefs = {
   monitorHeight: 220,
   statusVisible: true,
   avoidCss: true,
+  // Starts hidden, same reasoning as the panel: it is opened from the menu,
+  // and must not cover the dsh UI before it is asked for.
+  sidebarVisible: false,
+  sidebarWidth: 280,
 }
 
 const DEFAULTS: Preferences = {
@@ -129,9 +137,28 @@ export function savePreferences(prefs: Partial<Preferences>) {
  * Merged field-by-field rather than whole-object so that adding a new panel
  * setting later does not wipe out the geometry the user already saved.
  */
+/**
+ * Coerce a numeric pref, falling back to the default when it is missing or not
+ * a finite number.
+ *
+ * The file is hand-editable JSON sitting next to the user's other dotfiles, and
+ * a `null` or a string where a width is expected flows straight into
+ * `WebContentsView.setBounds()`, which does not accept NaN. Sanitising at the
+ * boundary is cheaper than a guard at every one of the call sites.
+ */
+function num(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
 export function loadPanelPrefs(): PanelPrefs {
   const p = loadPreferences().panel
-  return { ...DEFAULT_PANEL_PREFS, ...(p ?? {}) }
+  const merged = { ...DEFAULT_PANEL_PREFS, ...(p ?? {}) }
+  return {
+    ...merged,
+    width: num(merged.width, DEFAULT_PANEL_PREFS.width),
+    monitorHeight: num(merged.monitorHeight, DEFAULT_PANEL_PREFS.monitorHeight),
+    sidebarWidth: num(merged.sidebarWidth, DEFAULT_PANEL_PREFS.sidebarWidth),
+  }
 }
 
 /** Persist a partial change to the panel geometry. */

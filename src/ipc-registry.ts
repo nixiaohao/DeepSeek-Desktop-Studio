@@ -8,17 +8,26 @@
  * closure alive for the lifetime of the process.
  *
  * Channel names:
- *   - legacy: `switch-theme`, `get-themes`, `get-version`, `window-*`
- *   - panel:  `panel:*` (namespaced so they cannot collide with the above)
+ *   - legacy:   `switch-theme`, `get-themes`, `get-version`, `window-*`
+ *   - panel:    `panel:*`   (namespaced so they cannot collide with the above)
+ *   - sidebar:  `sidebar:*` (the file/git sidebar; likewise namespaced)
+ *
+ * Every channel STRING in the app lives in this file, because that is what
+ * test/panel-api.contract.cjs correlates against: a name defined anywhere else
+ * is invisible to it, and an unregistered name fails only at runtime, for the
+ * user, in a packaged app with no devtools.
  */
-import { ipcMain, shell, BrowserWindow, Notification } from 'electron'
+import { ipcMain, shell, clipboard, dialog, BrowserWindow, Notification } from 'electron'
+import { existsSync } from 'node:fs'
 import { subscribeBackend, getBackendLines, getLogDir, log } from './logging.js'
 import type { BackendLine } from './logging.js'
 import { loadCurrentThemeCSS, listThemes } from './theme.js'
 import { savePreferences, loadPanelPrefs, savePanelPrefs, loadExternalEditor } from './preferences.js'
 import { openInEditor } from './external-editor.js'
+import { isWithinRoot } from './fs-tree.js'
 import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
+import type { SidebarService } from './sidebar-service.js'
 import type { DshStream, ApprovalOutcome } from './dsh-stream.js'
 
 export interface IpcDeps {
@@ -30,6 +39,12 @@ export interface IpcDeps {
    * carries no version promise upstream.
    */
   getStream: () => DshStream | null
+  /**
+   * The file/git sidebar, or null when it was never created. Optional because
+   * registerIpc() must stay callable before the app has a workspace — the
+   * smoke test calls it with neither a stream nor a sidebar.
+   */
+  getSidebar?: () => SidebarService | null
   getAppVersion: () => string
   /**
    * Restart the backend process only. The caller (main.ts) must reload the
@@ -42,15 +57,92 @@ export interface IpcDeps {
   quitApp: () => void
 }
 
-/** Push a message to both overlay views (panel + status bar). */
+/**
+ * Late-bound lookup for the WindowManager, so helpers defined OUTSIDE
+ * registerIpc (notifyApprovalRequired, pushSidebarUpdate) can still reach it.
+ *
+ * main.ts is the only place that knows about the manager, so it wires this
+ * once on boot. Without it, a notification or a sidebar push that fired before
+ * the window existed would throw instead of being silently dropped.
+ */
+let getWindowManagerCached: (() => WindowManager | null) | null = null
+export function setWindowManagerAccessor(fn: () => WindowManager | null): void {
+  getWindowManagerCached = fn
+}
+
+/**
+ * Push a `panel:*` message to the two views that consume it.
+ *
+ * The sidebar is deliberately NOT in this list, even though it is a sibling
+ * overlay: it has its own preload and listens to exactly one channel
+ * (`sidebar:update`, via pushSidebarUpdate). Fanning every health tick and
+ * every change-review revision out to it would be pure overhead, and would
+ * silently couple the sidebar to the panel's payload shapes.
+ */
 function broadcast(wm: WindowManager | null, channel: string, payload: unknown): void {
   if (!wm) return
+  for (const view of [wm.panel, wm.statusBar]) {
+    try {
+      view?.webContents.send(channel, payload)
+    } catch { /* view destroyed mid-send */ }
+  }
+}
+
+/**
+ * The sidebar snapshot handed back when there is no sidebar at all.
+ *
+ * Returning a well-typed EMPTY state instead of null keeps sidebar.html free of
+ * null checks on every field: it renders "未选择目录" and waits, which is also
+ * what it should do before the app has picked a workspace.
+ */
+const EMPTY_SIDEBAR = {
+  root: '',
+  rows: [] as unknown[],
+  truncated: false,
+  errors: [] as { path: string; message: string }[],
+  git: {
+    isRepo: false,
+    branch: '',
+    root: '',
+    summary: { total: 0, staged: 0, unstaged: 0, untracked: 0, conflicted: 0 },
+    writeLocked: false,
+    files: [] as unknown[],
+  },
+  suggestions: [] as string[],
+}
+
+/**
+ * Tell the sidebar page to re-read its snapshot.
+ *
+ * Exported rather than defined in main.ts because main.ts constructs the
+ * SidebarService (and therefore needs this callback) BEFORE registerIpc()
+ * exists, and because keeping the channel string here is what lets the
+ * contract test prove the producer and the consumer agree.
+ *
+ * Resolved through the late-bound accessor, not a captured manager: the
+ * sidebar outlives individual windows, and a captured one would be stale
+ * after a relaunch.
+ */
+export function pushSidebarUpdate(): void {
+  const view = getWindowManagerCached?.()?.sidebar ?? null
+  if (!view) return
   try {
-    wm.panel?.webContents.send(channel, payload)
+    view.webContents.send('sidebar:update')
   } catch { /* view destroyed mid-send */ }
-  try {
-    wm.statusBar?.webContents.send(channel, payload)
-  } catch { /* view destroyed mid-send */ }
+}
+
+/**
+ * Refuse any path from the renderer that is not inside the sidebar's root.
+ *
+ * The renderer is our own asset and contextIsolation is on, so this is not
+ * defending against an attacker — it is defending against a STALE view: the
+ * sidebar can hold rows from a directory it is no longer showing, and acting on
+ * one of those would open or diff a file the user never pointed at.
+ */
+function safeSidebarPath(sidebar: SidebarService | null, path: unknown): string {
+  if (!sidebar || !sidebar.root) return ''
+  if (typeof path !== 'string' || path.length === 0) return ''
+  return isWithinRoot(sidebar.root, path) ? path : ''
 }
 
 /**
@@ -179,6 +271,102 @@ export function registerIpc(deps: IpcDeps): () => void {
     return wm ? wm.panelPrefs : loadPanelPrefs()
   })
 
+  // ── Sidebar: file tree + git ──
+
+  ipcMain.handle('sidebar:snapshot', () => deps.getSidebar?.()?.snapshot() ?? EMPTY_SIDEBAR)
+
+  ipcMain.handle('sidebar:set-root', async (_e, dir: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    if (typeof dir !== 'string' || dir.length === 0) return { ok: false, error: '空路径' }
+    if (!existsSync(dir)) return { ok: false, error: `目录不存在：${dir}` }
+    try {
+      await sidebar.setRoot(dir)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('sidebar:pick-dir', async () => {
+    const win = getWindowManager()?.window ?? null
+    const res = await dialog.showOpenDialog(win ?? undefined!, {
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (res.canceled || !res.filePaths.length) return ''
+    return res.filePaths[0]
+  })
+
+  ipcMain.handle('sidebar:toggle-dir', (_e, path: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    const safe = safeSidebarPath(sidebar, path)
+    if (!safe) return { ok: false, error: '路径不在侧栏目录内' }
+    sidebar!.toggleDir(safe)
+    return { ok: true }
+  })
+
+  ipcMain.handle('sidebar:collapse-all', () => {
+    const sidebar = deps.getSidebar?.() ?? null
+    sidebar?.collapseAll()
+    return { ok: true }
+  })
+
+  ipcMain.handle('sidebar:refresh', async () => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar) return { ok: false, error: '侧栏尚未就绪' }
+    await sidebar.refreshAll(true)
+    return { ok: true }
+  })
+
+  ipcMain.handle('sidebar:diff', async (_e, path: unknown) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    const safe = safeSidebarPath(sidebar, path)
+    if (!safe) return { ok: false, text: '', truncated: false, error: '路径不在侧栏目录内' }
+    try {
+      return await sidebar!.diff(safe)
+    } catch (err) {
+      return { ok: false, text: '', truncated: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('sidebar:open', async (_e, path: unknown, line?: number) => {
+    const sidebar = deps.getSidebar?.() ?? null
+    const safe = safeSidebarPath(sidebar, path)
+    if (!safe) return { ok: false, error: '路径不在侧栏目录内' }
+    try {
+      return await openInEditor(loadExternalEditor(), safe, line)
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('sidebar:reveal', (_e, path: unknown) => {
+    const safe = safeSidebarPath(deps.getSidebar?.() ?? null, path)
+    if (!safe) return { ok: false, error: '路径不在侧栏目录内' }
+    shell.showItemInFolder(safe)
+    return { ok: true }
+  })
+
+  ipcMain.handle('sidebar:copy', (_e, path: unknown) => {
+    if (typeof path !== 'string' || path.length === 0) return { ok: false, error: '空路径' }
+    clipboard.writeText(path)
+    return { ok: true }
+  })
+
+  ipcMain.handle('sidebar:set-width', (_e, w: number) => {
+    if (typeof w !== 'number' || !Number.isFinite(w)) return
+    getWindowManager()?.setSidebarWidth(w)
+  })
+
+  // Its own channel rather than reusing `panel:get-prefs`: the sidebar would
+  // then be reading a blob shaped for a different page, and the prefs object
+  // grows a field every time a panel does. Also keeps every channel a
+  // renderer touches namespaced to that renderer.
+  ipcMain.handle('sidebar:get-prefs', () => {
+    const prefs = getWindowManager()?.panelPrefs ?? loadPanelPrefs()
+    return { sidebarWidth: prefs.sidebarWidth, sidebarVisible: prefs.sidebarVisible }
+  })
+
   // ── Live feeds ──
 
   // ONE subscription feeds both consumers. The health monitor deliberately
@@ -202,6 +390,29 @@ export function registerIpc(deps: IpcDeps): () => void {
    * set and lets an approval that comes back after its TTL notify again.
    */
   const notifiedApprovals = new Set<string>()
+
+  /**
+   * Give the sidebar its first directory, taken from the session dsh is
+   * actually working in.
+   *
+   * The sidebar is useless pointing at nothing, and the whole point of it is to
+   * show what the agent is touching — so the agent's own cwd is a better
+   * default than the auto-update workspace. Picked ONCE: after that the user's
+   * choice wins, because yanking the tree to a different directory mid-task
+   * is worse than a stale one.
+   */
+  const autoPickSidebarRoot = (): void => {
+    const sidebar = deps.getSidebar?.() ?? null
+    if (!sidebar || sidebar.root) return
+    // sessions() is already ordered most-recently-updated first, so the first
+    // one that still exists on disk is the agent's current focus.
+    const dirs = (deps.getStream?.()?.sessions() ?? [])
+      .map((s) => s.cwd)
+      .filter((d): d is string => typeof d === 'string' && d.length > 0)
+    const best = dirs.find((d) => existsSync(d))
+    if (best) void sidebar.setRoot(best)
+  }
+
   const stream = deps.getStream?.() ?? null
   stream?.setOnChange(() => {
     revision += 1
@@ -221,6 +432,12 @@ export function registerIpc(deps: IpcDeps): () => void {
       notifiedApprovals.add(approval.approvalId)
       notifyApprovalRequired(approval)
     }
+
+    // Keep the sidebar's git badges in step with what the agent is doing.
+    // Throttled inside the service, so a burst of frames costs one `git
+    // status`, and the refresh announces itself when it lands.
+    autoPickSidebarRoot()
+    void deps.getSidebar?.()?.refreshGit()
   })
 
   // Health has no feed of its own: the monitor emits on change, and a ticker
@@ -313,12 +530,4 @@ function friendlyApprovalLabel(tool: string): string {
     'ask_user': '向你提问',
   }
   return known[tool] ?? `调用 ${tool}`
-}
-
-// Late-bound lookup so notifyApprovalRequired (defined outside registerIpc)
-// can still reach the WindowManager. main.ts is the only place that knows about
-// it, so it wires `setWindowManagerAccessor` once on boot.
-let getWindowManagerCached: (() => WindowManager | null) | null = null
-export function setWindowManagerAccessor(fn: () => WindowManager | null): void {
-  getWindowManagerCached = fn
 }

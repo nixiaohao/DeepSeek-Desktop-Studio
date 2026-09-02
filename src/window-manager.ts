@@ -34,11 +34,15 @@ export const STATUS_BAR_HEIGHT = 26
 /** Draggable width limits for the right panel, px. */
 export const PANEL_MIN_WIDTH = 240
 export const PANEL_MAX_WIDTH = 720
+/** Draggable width limits for the left file/git sidebar, px. */
+export const SIDEBAR_MIN_WIDTH = 200
+export const SIDEBAR_MAX_WIDTH = 560
 
 export class WindowManager {
   private readonly win: BrowserWindow
   private panelView: WebContentsView | null = null
   private statusView: WebContentsView | null = null
+  private sidebarView: WebContentsView | null = null
   private prefs: PanelPrefs
   private avoidCssKey: string | null = null
   private resizeBound = false
@@ -63,6 +67,11 @@ export class WindowManager {
     return this.statusView
   }
 
+  /** The file/git sidebar's WebContentsView (null until attach()). */
+  get sidebar(): WebContentsView | null {
+    return this.sidebarView
+  }
+
   get panelPrefs(): PanelPrefs {
     return { ...this.prefs }
   }
@@ -75,6 +84,7 @@ export class WindowManager {
     if (this.panelView) return
 
     const preload = join(__dirname, 'panel-preload.js')
+    const sidebarPreload = join(__dirname, 'sidebar-preload.js')
     const assets = join(app.getAppPath(), 'assets')
 
     // IMPORTANT: `sandbox: false` here and on every overlay.
@@ -110,13 +120,32 @@ export class WindowManager {
     })
     this.statusView.webContents.loadFile(join(assets, 'statusbar.html'))
 
+    // The sidebar gets its OWN preload rather than sharing panel-preload.js:
+    // that file's exposed API is brace-matched by test/panel-api.contract.cjs,
+    // so every sidebar method added there would have to satisfy the panel's
+    // contract too. Separate file, separate contract.
+    //
+    // `sandbox: false` for the same reason as the others — see the long comment
+    // above. It requires no local modules today, but the next person to add one
+    // should not have to rediscover this.
+    this.sidebarView = new WebContentsView({
+      webPreferences: {
+        preload: sidebarPreload,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    })
+    this.sidebarView.webContents.loadFile(join(assets, 'sidebar.html'))
+
     // Catch preload failures. Electron emits this when the script throws OR
     // never finishes loading. Without it the user sees only a dead "preload 未
     // 加载" string with no clue why; with it we get a real reason in the log
     // and panel.html can show it instead of the dead default.
-    for (const view of [this.panelView, this.statusView]) {
+    for (const view of [this.panelView, this.statusView, this.sidebarView]) {
       if (!view) continue
-      const label = view === this.panelView ? 'panel' : 'statusbar'
+      const label =
+        view === this.panelView ? 'panel' : view === this.statusView ? 'statusbar' : 'sidebar'
       view.webContents.on('preload-error', (_e, preloadPath, err) => {
         const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
         log('launcher', `preload-error[${label}] path=${preloadPath} ${message}`)
@@ -128,6 +157,7 @@ export class WindowManager {
 
     this.win.contentView.addChildView(this.panelView)
     this.win.contentView.addChildView(this.statusView)
+    this.win.contentView.addChildView(this.sidebarView)
 
     // Re-inject the avoidance padding after every navigation: Electron drops
     // inserted CSS when the page reloads.
@@ -147,7 +177,7 @@ export class WindowManager {
 
   /** Recompute every overlay's bounds. Call after ANY geometry change. */
   layout(): void {
-    if (!this.panelView && !this.statusView) return
+    if (!this.panelView && !this.statusView && !this.sidebarView) return
     const [cw, ch] = this.win.getContentSize()
     const bar = this.prefs.statusVisible ? STATUS_BAR_HEIGHT : 0
 
@@ -159,6 +189,17 @@ export class WindowManager {
         x: Math.max(0, cw - this.prefs.width),
         y: 0,
         width: this.prefs.width,
+        height: Math.max(0, ch - bar),
+      })
+    }
+    if (this.sidebarView) {
+      // sidebarWidthNow(), not prefs.sidebarWidth: the drawn width is clamped,
+      // and the padding injected by refreshAvoidance() has to match what was
+      // actually drawn or the page ends up with a gap.
+      this.sidebarView.setBounds({
+        x: 0,
+        y: 0,
+        width: this.sidebarWidthNow(),
         height: Math.max(0, ch - bar),
       })
     }
@@ -174,6 +215,28 @@ export class WindowManager {
 
   togglePanel(): void {
     this.setPanelVisible(!this.prefs.visible)
+  }
+
+  setSidebarVisible(visible: boolean): void {
+    this.prefs = { ...this.prefs, sidebarVisible: visible }
+    savePanelPrefs({ sidebarVisible: visible })
+    this.applyVisibility()
+    this.layout()
+    void this.refreshAvoidance()
+  }
+
+  toggleSidebar(): void {
+    this.setSidebarVisible(!this.prefs.sidebarVisible)
+  }
+
+  /** Resize the sidebar (dragged from its right edge inside sidebar.html). */
+  setSidebarWidth(width: number): void {
+    const clamped = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)))
+    if (clamped === this.prefs.sidebarWidth) return
+    this.prefs = { ...this.prefs, sidebarWidth: clamped }
+    savePanelPrefs({ sidebarWidth: clamped })
+    this.layout()
+    void this.refreshAvoidance()
   }
 
   setStatusVisible(visible: boolean): void {
@@ -220,15 +283,19 @@ export class WindowManager {
       await this.clearAvoidance()
       return
     }
+    const left = this.prefs.sidebarVisible ? this.sidebarWidthNow() : 0
     const right = this.prefs.visible ? this.prefs.width : 0
     const bottom = this.prefs.statusVisible ? STATUS_BAR_HEIGHT : 0
 
     await this.clearAvoidance()
-    if (right === 0 && bottom === 0) return
+    if (left === 0 && right === 0 && bottom === 0) return
 
+    // `padding-left` is what keeps the dsh page from sliding under the
+    // sidebar. It is only correct while the sidebar is actually that wide —
+    // see sidebarWidthNow().
     const css =
-      `html{padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}` +
-      `body{padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}`
+      `html{padding-left:${left}px!important;padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}` +
+      `body{padding-left:${left}px!important;padding-right:${right}px!important;padding-bottom:${bottom}px!important;box-sizing:border-box!important;}`
     try {
       this.avoidCssKey = await this.win.webContents.insertCSS(css)
     } catch (err) {
@@ -248,9 +315,27 @@ export class WindowManager {
     }
   }
 
+  /**
+   * The width the sidebar is ACTUALLY drawn at, which is not always the
+   * configured one: on a narrow window the sidebar plus the panel would
+   * otherwise squeeze the page away to nothing, so the width is clamped at
+   * draw time and a minimum of 320px is always left for the page.
+   *
+   * Single source of truth on purpose. `layout()` uses it to set the bounds and
+   * `refreshAvoidance()` uses it to size the padding — when those two
+   * disagreed, the page was padded for a sidebar that was never drawn and a
+   * dead gap appeared along the left edge.
+   */
+  private sidebarWidthNow(): number {
+    const [cw] = this.win.getContentSize()
+    const right = this.prefs.visible ? this.prefs.width : 0
+    return Math.min(this.prefs.sidebarWidth, Math.max(SIDEBAR_MIN_WIDTH, cw - right - 320))
+  }
+
   private applyVisibility(): void {
     this.panelView?.setVisible(this.prefs.visible)
     this.statusView?.setVisible(this.prefs.statusVisible)
+    this.sidebarView?.setVisible(this.prefs.sidebarVisible)
   }
 
   /** Tear down views. Call when the window closes. */
@@ -258,10 +343,13 @@ export class WindowManager {
     try {
       if (this.panelView) this.win.contentView.removeChildView(this.panelView)
       if (this.statusView) this.win.contentView.removeChildView(this.statusView)
+      if (this.sidebarView) this.win.contentView.removeChildView(this.sidebarView)
     } catch { /* window already gone */ }
     this.panelView?.webContents.close()
     this.statusView?.webContents.close()
+    this.sidebarView?.webContents.close()
     this.panelView = null
     this.statusView = null
+    this.sidebarView = null
   }
 }

@@ -110,8 +110,8 @@ export class SidebarService {
     this.tree.setRoot(dir)
     this.gitState = EMPTY_GIT
     this.lastGitAt = 0
+    // Announced by the refresh itself, which always runs with force=true.
     await this.refreshGit(true)
-    this.onChange()
   }
 
   /** Open or close one folder. Cheap: no I/O beyond a possible directory read. */
@@ -167,9 +167,23 @@ export class SidebarService {
   }
 
   private async doRefreshGit(): Promise<void> {
-    let snap: GitSnapshot
     try {
-      snap = await this.git.snapshot(this.tree.root)
+      const snap: GitSnapshot = await this.git.snapshot(this.tree.root)
+      this.gitState = {
+        isRepo: snap.isRepo,
+        branch: snap.branch,
+        root: snap.root,
+        summary: snap.summary,
+        writeLocked: snap.writeLocked,
+        // The tree badges rows by walking the whole tree, so it needs every
+        // entry; only the list RENDERED in the git section is capped.
+        files: snap.entries.slice(0, CHANGED_FILES_LIMIT),
+        ...(snap.error ? { error: snap.error } : {}),
+      }
+      // The directory listing is cached, so a file the agent just created
+      // would stay invisible. Drop the cache and let the next snapshot()
+      // re-read.
+      this.tree.refresh()
     } catch (err) {
       // GitService is documented never to reject, but it is INJECTED, and a
       // throw here would propagate out of setRoot() into an IPC handler and
@@ -179,32 +193,20 @@ export class SidebarService {
         ...EMPTY_GIT,
         error: `读取 git 状态失败：${(err as Error).message || String(err)}`,
       }
-      return
     }
-    const next: SidebarGitState = {
-      isRepo: snap.isRepo,
-      branch: snap.branch,
-      root: snap.root,
-      summary: snap.summary,
-      writeLocked: snap.writeLocked,
-      // The tree badges rows by walking the whole tree, so it needs every
-      // entry; only the list RENDERED in the git section is capped.
-      files: snap.entries.slice(0, CHANGED_FILES_LIMIT),
-      ...(snap.error ? { error: snap.error } : {}),
-    }
-    this.gitState = next
-    // The directory listing is cached, so a file the agent just created would
-    // stay invisible. Drop the cache and let the next snapshot() re-read.
-    this.tree.refresh()
+    // Refreshes are driven from the mux stream, i.e. in the background with
+    // nobody holding the return value. If the state change were not announced
+    // here the panel would sit on stale git data until the user clicked
+    // something. Both paths announce — an error is a state change too.
+    this.onChange()
   }
 
   /** Refresh git and the tree together. */
   async refreshAll(force = false): Promise<void> {
     const ran = await this.refreshGit(force)
-    if (!ran) {
-      // Even when git was fresh, the disk may have changed.
-      this.tree.refresh()
-    }
+    if (ran) return // doRefreshGit already announced.
+    // Git was fresh, but that says nothing about the disk.
+    this.tree.refresh()
     this.onChange()
   }
 

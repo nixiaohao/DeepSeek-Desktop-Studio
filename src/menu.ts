@@ -24,10 +24,16 @@ export interface MenuActions {
 
   // ── overlay panel / status bar ──
   /** Current visibility flags, read when the menu is built. */
-  getPanelState: () => { panel: boolean; statusBar: boolean; avoidCss: boolean }
+  getPanelState: () => {
+    panel: boolean
+    statusBar: boolean
+    avoidCss: boolean
+    sidebar: boolean
+  }
   togglePanel: () => void
   toggleStatusBar: () => void
   toggleAvoidCss: () => void
+  toggleSidebar: () => void
 
   // ── backend ──
   restartBackend: () => void
@@ -84,7 +90,14 @@ export function setupMenu(actions: MenuActions): void {
         { type: 'separator' },
         { label: '全屏', role: 'togglefullscreen' },
         { type: 'separator' },
-        // ── Overlay panel ──
+        // ── Overlay panel / sidebar ──
+        {
+          label: '文件侧栏',
+          accelerator: 'Ctrl+Alt+F',
+          type: 'checkbox',
+          checked: panel.sidebar,
+          click: () => actions.toggleSidebar(),
+        },
         {
           label: '监控面板',
           accelerator: 'Ctrl+Alt+B',

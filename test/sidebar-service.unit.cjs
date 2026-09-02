@@ -305,6 +305,27 @@ async function main() {
     ])
   })
 
+  await section('a background refresh announces itself', async () => {
+    // Refreshes are driven from the mux stream, so in the app nobody holds the
+    // return value. If the service did not announce, the panel would sit on
+    // stale git data until the user happened to click something.
+    const { svc, changes } = make()
+    await svc.setRoot('/r')
+    const before = changes.length
+    svc.lastGitAt = 0
+    await svc.refreshGit(true)
+    check('the refresh was announced', changes.length, before + 1)
+
+    // An error is a state change too — otherwise a broken git would leave the
+    // panel showing the last good status with no hint that it went stale.
+    const broken = make({ git: fakeGit(async () => { throw new Error('boom') }) })
+    await broken.svc.setRoot('/r')
+    const beforeBroken = broken.changes.length
+    broken.svc.lastGitAt = 0
+    await broken.svc.refreshGit(true)
+    check('and so is a failure', broken.changes.length, beforeBroken + 1)
+    check('with the reason attached', broken.svc.gitInfo.error.includes('boom'), true)
+  })
   await section('refreshAll drops the cache even when git is fresh', async () => {
     // The tree cache is separate from the git throttle: "git was fresh" says
     // nothing about whether a file appeared on disk.

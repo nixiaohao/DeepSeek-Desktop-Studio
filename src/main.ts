@@ -30,9 +30,12 @@ import { log, getLogDir, isDebug, redactTokenInText } from './logging.js'
 import { relaunchApp } from './relaunch.js'
 import { WindowManager } from './window-manager.js'
 import { HealthMonitor } from './health-monitor.js'
-import { registerIpc, setWindowManagerAccessor } from './ipc-registry.js'
+import { registerIpc, setWindowManagerAccessor, pushSidebarUpdate } from './ipc-registry.js'
 import { DshStream } from './dsh-stream.js'
 import { describeEditorConfig, pickEditorInteractively } from './external-editor.js'
+import { FileTree } from './file-tree.js'
+import { GitService } from './git-service.js'
+import { SidebarService } from './sidebar-service.js'
 
 // ── Startup hardening (must run before app ready) ──
 // 1. GPU 加速在虚拟机/远程桌面/部分驱动上会导致白屏或启动崩溃，本应用为 Web UI 外壳，无需 GPU。
@@ -100,6 +103,18 @@ let healthMonitor: HealthMonitor | null = null
 let dshStream: DshStream | null = null
 /** Unsubscribes the IPC feeds. Must run on window close / quit. */
 let teardownIpc: (() => void) | null = null
+/**
+ * The file/git sidebar's state. Created eagerly so registerIpc() can reach it,
+ * but its directory is only chosen once the stream reports where a session is
+ * working (see ipc-registry.ts).
+ */
+let sidebarService: SidebarService | null = null
+/**
+ * The auto-update workspace, i.e. the directory the sidebar must treat as
+ * read-only. Set from resolveWorkspace() below; until then the sidebar cannot
+ * be write-locked, which errs on the safe side only because it is also empty.
+ */
+let workspaceDir = ''
 
 // ── Splash Window ──
 
@@ -752,7 +767,16 @@ function buildMenuActions(): MenuActions {
 
     getPanelState: () => {
       const p = windowManager?.panelPrefs ?? loadPanelPrefs()
-      return { panel: p.visible, statusBar: p.statusVisible, avoidCss: p.avoidCss }
+      return {
+        panel: p.visible,
+        statusBar: p.statusVisible,
+        avoidCss: p.avoidCss,
+        sidebar: p.sidebarVisible,
+      }
+    },
+    toggleSidebar: () => {
+      windowManager?.toggleSidebar()
+      rebuildMenu()
     },
     togglePanel: () => {
       windowManager?.togglePanel()
@@ -808,12 +832,26 @@ app.whenReady().then(async () => {
     log: (message) => log('launcher', `[mux] ${redactTokenInText(message)}`),
   })
 
+  // The sidebar. Both collaborators are late-bound on purpose: the managed
+  // directory is only known after resolveWorkspace(), and the session list only
+  // after the stream connects. Neither is available at construction time.
+  sidebarService = new SidebarService({
+    tree: new FileTree(),
+    git: new GitService({ getManagedDir: () => workspaceDir || null }),
+    getSuggestions: () =>
+      (dshStream?.sessions() ?? [])
+        .map((s) => s.cwd)
+        .filter((d): d is string => typeof d === 'string' && d.length > 0),
+    onChange: pushSidebarUpdate,
+  })
+
   // All IPC lives in ipc-registry.ts now. main.ts had grown past 700 lines and
   // every new panel action meant touching it.
   teardownIpc = registerIpc({
     getWindowManager: () => windowManager,
     getHealthMonitor: () => healthMonitor,
     getStream: () => dshStream,
+    getSidebar: () => sidebarService,
     getAppVersion: () => launcher?.version ?? app.getVersion(),
     restartBackend,
     getStatusInfo: statusInfo,
@@ -824,6 +862,9 @@ app.whenReady().then(async () => {
 
   // 1. Resolve the workspace (exe dir → source-dir.txt → userData fallback)
   const workspace = resolveWorkspace()
+  // Gates the sidebar's write lock: everything under this directory is owned by
+  // the auto-updater, which will `git reset --hard` it without asking.
+  workspaceDir = workspace.dir
   log(
     'launcher',
     `workspace=${workspace.dir} existed=${workspace.existed} ` +

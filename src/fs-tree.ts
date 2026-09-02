@@ -307,6 +307,15 @@ export interface TreeRow {
   depth: number
   /** Whether the row shows a disclosure triangle. */
   expandable: boolean
+  /**
+   * Whether an expandable row is currently open.
+   *
+   * The renderer could derive this from the next row's depth, but that breaks
+   * on the last row and on an empty directory — and getting a triangle pointing
+   * the wrong way is exactly the kind of tiny wrongness that makes a file tree
+   * feel broken.
+   */
+  expanded: boolean
   /** Short git marker ('' when clean) — see gitStatusBadge. */
   badge: string
   /** Chinese git status label ('' when clean). */
@@ -395,6 +404,7 @@ export function buildTreeRows(opts: BuildTreeOptions): TreeResult {
         // reading one level deeper for every row, and an empty directory with a
         // triangle is a far cheaper mistake than an eager recursive read.
         expandable: e.isDir,
+        expanded: e.isDir && opts.expanded.has(e.path),
         badge: entry ? gitStatusBadge(entry) : '',
         status: entry ? gitStatusLabel(entry.code) : '',
       })
