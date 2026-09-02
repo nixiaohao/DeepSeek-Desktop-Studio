@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('dshLogs', {
   /** Reveal the log directory in the OS file manager. */
   revealLogDir: (): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('logs:reveal-dir'),
+
+  /** Desired total height while the top-edge handle is dragged. */
+  setHeight: (h: number): void => {
+    ipcRenderer.send('logs:set-height', h)
+  },
 })
 
 /**

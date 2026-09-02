@@ -26,6 +26,9 @@
     --fs-sm: calc(12px * var(--fs-scale));
     --font-ui: "Segoe UI", "Microsoft YaHei", sans-serif;
     --font-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+    /* Alias so the resizer gradient can use the same token name as the
+       panel/sidebar handles (this page historically calls the value --dim). */
+    --fg-dim: var(--dim);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
@@ -35,6 +38,22 @@
     display: flex; flex-direction: column;
     border-top: 1px solid var(--border);
     user-select: none;
+  }
+
+  /* Top-edge drag handle (log bar height), same visual contract as the
+     panel/sidebar handles: a ≥2px high-contrast line inside the 6px strip,
+     accent on hover. Same stop order as panel.html so the line reads the
+     same way. */
+  #resizer {
+    height: 6px; cursor: ns-resize; flex: none;
+    background: linear-gradient(to bottom,
+      transparent 0, transparent 4px,
+      var(--fg-dim) 4px, var(--fg-dim) 6px);
+    box-shadow: 0 0 6px rgba(76, 141, 255, 0.22);
+  }
+  #resizer:hover, #resizer.dragging {
+    background: var(--accent);
+    box-shadow: 0 0 10px rgba(76, 141, 255, 0.45);
   }
 
   header {
@@ -82,6 +101,7 @@
 </style>
 </head>
 <body>
+  <div id="resizer" title="拖动调整日志面板高度"></div>
   <header>
     <span class="title">日志</span>
     <span id="chips"></span>
@@ -219,6 +239,30 @@
   autoscroll.onchange = function () {
     if (autoscroll.checked) linesEl.scrollTop = linesEl.scrollHeight;
   };
+
+  // ── top-edge resizer (log bar height, handled by the main process) ──────
+  // Same delta pattern as panel.html's width handle: report the desired TOTAL
+  // height, the main process clamps (LOGBAR_MIN/MAX) and relayouts.
+  if (api.setHeight) {
+    var resizer = document.getElementById('resizer');
+    resizer.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      resizer.classList.add('dragging');
+      var startY = e.clientY;
+
+      function onMove(ev) {
+        // Dragging up grows the bar; report the desired total height.
+        api.setHeight(window.innerHeight + (startY - ev.clientY));
+      }
+      function onUp() {
+        resizer.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
 })();
 </script>
 </body>

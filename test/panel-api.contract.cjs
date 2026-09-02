@@ -426,7 +426,7 @@ for (const asset of ALL_PAGES) {
  */
 console.log('panel-api: resizer visibility')
 
-const RESIZER_PAGES = [path.join('assets', 'panel.html'), path.join('assets', 'sidebar.html')]
+const RESIZER_PAGES = [path.join('assets', 'panel.html'), path.join('assets', 'sidebar.html'), path.join('assets', 'logbar.html')]
 
 for (const asset of RESIZER_PAGES) {
   const html = read(asset)

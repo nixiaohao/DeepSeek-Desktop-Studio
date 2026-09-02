@@ -488,7 +488,7 @@ export class WindowManager {
     this.setLogbarVisible(!this.prefs.logbarVisible)
   }
 
-  /** Resize the log bar (height; there is no drag handle — menu/defaults only). */
+  /** Resize the log bar (dragged from its top edge inside logbar.html). */
   setLogbarHeight(height: number): void {
     const clamped = Math.min(LOGBAR_MAX_HEIGHT, Math.max(LOGBAR_MIN_HEIGHT, Math.round(height)))
     if (clamped === this.prefs.logbarHeight) return

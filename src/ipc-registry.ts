@@ -628,6 +628,17 @@ export function registerIpc(deps: IpcDeps): () => void {
     return err ? { ok: false, error: err } : { ok: true }
   })
 
+  // The logbar page sends the desired TOTAL height while its top-edge handle
+  // is dragged; setLogbarHeight clamps to LOGBAR_MIN/MAX, persists and
+  // relayouts, so a burst of mousemove events costs at most one relayout each
+  // and a stale page cannot push an absurd number into the geometry.
+  // One-way (`on`) on purpose: drag updates have nothing to reply with, and a
+  // queued reply per mousemove would only pile up during fast drags.
+  ipcMain.on('logs:set-height', (_e, h: number) => {
+    if (typeof h !== 'number' || !Number.isFinite(h)) return
+    getWindowManager()?.setLogbarHeight(h)
+  })
+
   // ── Settings: standalone settings window ──
 
   /**
