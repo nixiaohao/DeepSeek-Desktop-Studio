@@ -75,6 +75,10 @@
   }
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
+  /* Visibility toggles: dim when the surface they name is hidden, accented
+     when it is on — the state is readable at a glance without a checkbox. */
+  button.tgl { opacity: .55; }
+  button.tgl.on { opacity: 1; border-color: var(--accent); color: #fff; }
 
   .c-starting { color: #4c8dff; }
   .c-ready    { color: #3ddc84; }
@@ -96,6 +100,8 @@
     <span id="errors"></span>
     <span class="sep"></span>
     <span id="meta"></span>
+    <button id="btn-sidebar" class="tgl" title="显示/隐藏文件侧栏（Ctrl+Alt+F）">侧栏</button>
+    <button id="btn-panel" class="tgl" title="显示/隐藏监控面板（Ctrl+Alt+B）">面板</button>
     <button id="btn-logs" title="打开日志文件夹">日志</button>
     <button id="btn-restart" title="仅重启后端服务">重启服务</button>
   </div>
@@ -174,6 +180,32 @@
   };
 
   logsBtn.onclick = function () { api.openLogs(); };
+
+  // ── visibility toggles (Reasonix-style, always reachable) ──
+  // The bar is the one surface that never hides, so the buttons live here:
+  // the panel can be toggled even while it is off-screen (the menu is the
+  // only alternative, and it is two levels deep).
+  var btnSidebar = document.getElementById('btn-sidebar');
+  var btnPanel = document.getElementById('btn-panel');
+
+  function renderVisibility(v) {
+    if (!v || typeof v !== 'object') return;
+    btnSidebar.className = 'tgl' + (v.sidebar ? ' on' : '');
+    btnPanel.className = 'tgl' + (v.panel ? ' on' : '');
+  }
+
+  if (api.getPrefs) api.getPrefs().then(renderVisibility).catch(function () {});
+  if (api.onVisibility) api.onVisibility(renderVisibility);
+  if (api.toggleSidebar) {
+    btnSidebar.onclick = function () {
+      api.toggleSidebar().then(renderVisibility).catch(function () {});
+    };
+  }
+  if (api.togglePanel) {
+    btnPanel.onclick = function () {
+      api.togglePanel().then(renderVisibility).catch(function () {});
+    };
+  }
 })();
 </script>
 </body>

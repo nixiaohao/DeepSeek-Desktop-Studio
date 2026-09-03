@@ -184,6 +184,24 @@ contextBridge.exposeInMainWorld('dshPanel', {
   getPrefs: (): Promise<unknown> => ipcRenderer.invoke('panel:get-prefs'),
 
   /**
+   * Toggle a sibling overlay from the status bar's own buttons. Resolves to
+   * the post-toggle visibility (`{ok, sidebar, panel}`), and the same state
+   * also arrives on `onVisibility` — the push covers changes made from the
+   * menu or the settings window, which this call did not initiate.
+   */
+  toggleSidebar: (): Promise<{ ok: boolean; sidebar?: boolean; panel?: boolean; error?: string }> =>
+    ipcRenderer.invoke('panel:toggle-sidebar'),
+
+  togglePanel: (): Promise<{ ok: boolean; sidebar?: boolean; panel?: boolean; error?: string }> =>
+    ipcRenderer.invoke('panel:toggle-panel'),
+
+  /** Fires whenever ANY overlay's visibility changed, from any surface. */
+  onVisibility: (cb: (state: { panel: boolean; sidebar: boolean; status: boolean; logbar: boolean }) => void): void => {
+    ipcRenderer.on('panel:visibility', (_e: IpcRendererEvent, state) => cb(state))
+  },
+  offVisibility: (cb: (...args: unknown[]) => void): void => off('panel:visibility', cb),
+
+  /**
    * Syntax-highlight a code preview for `filePath`, as an HTML fragment.
    *
    * Takes the PATH rather than a language id: choosing the language is an

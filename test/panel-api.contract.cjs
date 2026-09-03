@@ -511,6 +511,29 @@ for (const asset of RESIZER_PAGES) {
   )
 }
 
+// ── 3b2b. Status-bar visibility toggles (the always-reachable switch) ──
+
+/**
+ * The status bar is the one surface that never hides, so it hosts the
+ * Reasonix-style 侧栏/面板 toggles. The wiring has three halves, each
+ * silently useless without the others: the call sites, the initial state
+ * pull, and the push listener that keeps the buttons in step when the
+ * change came from the menu or the settings window.
+ */
+{
+  const html = read(path.join('assets', 'statusbar.html'))
+  assert(
+    /api\.toggleSidebar\s*\(/.test(html) && /api\.togglePanel\s*\(/.test(html),
+    'statusbar.html wires the visibility toggle buttons',
+    'the toggle buttons no longer call api.toggleSidebar/togglePanel — clicking them does nothing'
+  )
+  assert(
+    /api\.getPrefs\s*\(/.test(html) && /api\.onVisibility\s*\(/.test(html),
+    'statusbar.html syncs toggle state from getPrefs + onVisibility',
+    'the toggle buttons lost their state sync — they would show a stale on/off after menu or settings changes'
+  )
+}
+
 // ── 3b3. Themed scrollbars on every shell page ────────────────────────
 
 /**

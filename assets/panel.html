@@ -42,6 +42,8 @@
     --fs-md: calc(13px * var(--fs-scale));
     --fs-sm: calc(12px * var(--fs-scale));
     --fs-xs: calc(11px * var(--fs-scale));
+    /* UI text in the system sans; mono stays for diffs and code previews. */
+    --font-ui: "Segoe UI", "Microsoft YaHei", sans-serif;
     --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -62,7 +64,7 @@
   html, body { height: 100%; overflow: hidden; }
   body {
     background: var(--bg); color: var(--fg);
-    font-family: var(--font-mono); font-size: var(--fs-base); line-height: 1.5;
+    font-family: var(--font-ui); font-size: var(--fs-base); line-height: 1.5;
     display: flex; flex-direction: row; user-select: none;
   }
 
@@ -96,7 +98,7 @@
   #tabs .tab {
     border: 1px solid var(--border); border-bottom: none;
     border-radius: 4px 4px 0 0; background: transparent; color: var(--fg-dim);
-    padding: 4px 12px; font-size: var(--fs-md); font-family: var(--font-mono);
+    padding: 4px 12px; font-size: var(--fs-md); font-family: var(--font-ui);
     cursor: pointer;
   }
   #tabs .tab.on {
@@ -119,7 +121,7 @@
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
     border-radius: 3px; padding: 2px 9px; cursor: pointer;
-    font-family: var(--font-mono); font-size: var(--fs-md); line-height: 1.4;
+    font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.4;
   }
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
@@ -256,7 +258,16 @@
   .tok-n { color: #b5cea8; } /* number  */
   .tok-a { color: #9cdcfe; } /* tag / attribute / key */
 
-  .empty { color: #5d6377; padding: 8px; font-size: var(--fs-md); }
+  .empty {
+    color: #5d6377; font-size: var(--fs-md);
+    /* A quiet empty state, not an error wall: centred with breathing room,
+       so an unconnected panel reads as "waiting", not "broken". */
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 7px; text-align: center; padding: 46px 14px; line-height: 1.6;
+  }
+  .empty .glyph { font-size: calc(26px * var(--fs-scale)); opacity: .45; line-height: 1; }
+  .empty .main { color: var(--fg-dim); }
+  .empty .sub2 { font-size: var(--fs-sm); opacity: .8; }
 
   label.chk { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-md); cursor: pointer; }
   label.chk input { margin: 0; }
@@ -634,9 +645,9 @@
     changesBody.textContent = '';
 
     if (!approvals.length && !changes.length) {
-      changesBody.appendChild(el('div', 'empty', snap.connected
-        ? '暂无变更。agent 修改文件时会出现在这里。'
-        : '尚未连接到 dsh 事件流。运行监控不受影响。'));
+      changesBody.appendChild(emptyNode('◌',
+        snap.connected ? '暂无变更' : '尚未连接到 dsh 事件流',
+        snap.connected ? 'agent 修改文件时会出现在这里' : '后端就绪后自动连接，运行监控不受影响'));
       return;
     }
 
@@ -698,6 +709,15 @@
     return row;
   }
 
+  /** One quiet empty state: glyph + main line + optional explanation. */
+  function emptyNode(glyph, main, sub) {
+    var d = el('div', 'empty');
+    d.appendChild(el('div', 'glyph', glyph));
+    d.appendChild(el('div', 'main', main));
+    if (sub) d.appendChild(el('div', 'sub2', sub));
+    return d;
+  }
+
   /**
    * Compaction threshold used for the tick and the 距压缩 figure.
    *
@@ -723,7 +743,7 @@
     body.textContent = '';
 
     if (nothing) {
-      body.appendChild(el('div', 'empty', '暂无用量数据。agent 跑起来后这里会出现上下文与 token 构成。'));
+      body.appendChild(emptyNode('◌', '暂无用量数据', 'agent 跑起来后这里会出现上下文与 token 构成'));
       return;
     }
 

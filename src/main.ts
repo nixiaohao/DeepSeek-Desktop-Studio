@@ -34,7 +34,7 @@ import { log, getLogDir, isDebug, redactTokenInText } from './logging.js'
 import { relaunchApp } from './relaunch.js'
 import { WindowManager } from './window-manager.js'
 import { HealthMonitor, PHASE_LABEL, type HealthPhase } from './health-monitor.js'
-import { registerIpc, setWindowManagerAccessor, pushSidebarUpdate } from './ipc-registry.js'
+import { registerIpc, setWindowManagerAccessor, pushSidebarUpdate, pushVisibilityUpdate } from './ipc-registry.js'
 import { DshStream } from './dsh-stream.js'
 import { describeEditorConfig, pickEditorInteractively } from './external-editor.js'
 import { FileTree } from './file-tree.js'
@@ -183,6 +183,10 @@ function createMainWindow(url: string): BrowserWindow {
   })
 
   windowManager = new WindowManager(win)
+  // Visibility changes can originate from the menu, a shortcut, the settings
+  // window, or the status bar's own toggle buttons — the status bar learns
+  // about all of them through this one push, so its buttons never drift.
+  windowManager.onVisibilityChange = (prefs) => pushVisibilityUpdate(prefs)
   const page = windowManager.createContentView({
     url,
     preload: join(__dirname, 'preload.js'),

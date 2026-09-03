@@ -184,6 +184,33 @@ export function pushSidebarUpdate(): void {
 }
 
 /**
+ * Push the overlay-visibility snapshot to the status bar.
+ *
+ * Exported like pushSidebarUpdate(): the channel string must live HERE (the
+ * contract test greps this file for every send/receive pair), while the
+ * trigger is main.ts's WindowManager.onVisibilityChange hook — which fires
+ * no matter whether the menu, a shortcut, the settings window or the status
+ * bar's own toggle buttons moved the panel.
+ */
+export function pushVisibilityUpdate(prefs: {
+  visible: boolean
+  sidebarVisible: boolean
+  statusVisible: boolean
+  logbarVisible: boolean
+}): void {
+  const view = getWindowManagerCached?.()?.statusBar ?? null
+  if (!view) return
+  try {
+    view.webContents.send('panel:visibility', {
+      panel: prefs.visible,
+      sidebar: prefs.sidebarVisible,
+      status: prefs.statusVisible,
+      logbar: prefs.logbarVisible,
+    })
+  } catch { /* view destroyed mid-send */ }
+}
+
+/**
  * The log bar's session filter: set by a double-click in the sidebar's session
  * navigator, cleared from the filter chip inside the log bar itself.
  *
@@ -449,6 +476,29 @@ export function registerIpc(deps: IpcDeps): () => void {
   ipcMain.handle('panel:get-prefs', () => {
     const wm = getWindowManager()
     return wm ? wm.panelPrefs : loadPanelPrefs()
+  })
+
+  /**
+   * Toggle a sibling overlay from the status bar's own buttons.
+   *
+   * The setter methods persist the pref, re-apply visibility, and fire the
+   * `panel:visibility` push (via onVisibilityChange), so EVERY consumer —
+   * this button, the menu checkbox, the settings window — re-renders from
+   * one source of truth. The return value is the post-toggle state so the
+   * click feels immediate even before the push lands.
+   */
+  ipcMain.handle('panel:toggle-sidebar', () => {
+    const wm = getWindowManager()
+    if (!wm) return { ok: false, error: '窗口尚未就绪' }
+    wm.toggleSidebar()
+    return { ok: true, sidebar: wm.panelPrefs.sidebarVisible, panel: wm.panelPrefs.visible }
+  })
+
+  ipcMain.handle('panel:toggle-panel', () => {
+    const wm = getWindowManager()
+    if (!wm) return { ok: false, error: '窗口尚未就绪' }
+    wm.togglePanel()
+    return { ok: true, sidebar: wm.panelPrefs.sidebarVisible, panel: wm.panelPrefs.visible }
   })
 
   // ── Diagnostics: standalone self-check window ──

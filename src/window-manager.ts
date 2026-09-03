@@ -106,6 +106,13 @@ export class WindowManager {
   private prefs: PanelPrefs
   private resizeBound = false
   /**
+   * Optional hook fired after ANY visibility pref changes (menu, shortcut,
+   * settings window, or the status bar's own toggle buttons). main.ts wires
+   * it to a `panel:visibility` push so the status bar's toggle buttons stay
+   * in step no matter which surface initiated the change.
+   */
+  onVisibilityChange?: (prefs: PanelPrefs) => void
+  /**
    * Per-overlay preload health, seeded in attach() and updated from the
    * `*:view-ready` ping and the preload-error / render-process-gone events.
    *
@@ -444,6 +451,7 @@ export class WindowManager {
     savePanelPrefs({ visible })
     this.applyVisibility()
     this.layout()
+    this.notifyVisibility()
   }
 
   togglePanel(): void {
@@ -455,6 +463,7 @@ export class WindowManager {
     savePanelPrefs({ sidebarVisible: visible })
     this.applyVisibility()
     this.layout()
+    this.notifyVisibility()
   }
 
   toggleSidebar(): void {
@@ -475,6 +484,7 @@ export class WindowManager {
     savePanelPrefs({ statusVisible: visible })
     this.applyVisibility()
     this.layout()
+    this.notifyVisibility()
   }
 
   setLogbarVisible(visible: boolean): void {
@@ -482,6 +492,14 @@ export class WindowManager {
     savePanelPrefs({ logbarVisible: visible })
     this.applyVisibility()
     this.layout()
+    this.notifyVisibility()
+  }
+
+  /** Fire the visibility hook (never throws — listeners are optional). */
+  private notifyVisibility(): void {
+    try {
+      this.onVisibilityChange?.({ ...this.prefs })
+    } catch { /* a broken listener must not break the toggle itself */ }
   }
 
   toggleLogbar(): void {

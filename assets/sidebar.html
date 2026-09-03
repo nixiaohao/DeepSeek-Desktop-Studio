@@ -31,6 +31,10 @@
     --fs-md: calc(13px * var(--fs-scale));
     --fs-sm: calc(12px * var(--fs-scale));
     --fs-xs: calc(11px * var(--fs-scale));
+    /* UI text runs in the system sans (native-app feel); mono is reserved for
+       things that ARE code-like: diffs and paths. Names, tabs, buttons read
+       better in Segoe UI — the mono tree read as "terminal", not "explorer". */
+    --font-ui: "Segoe UI", "Microsoft YaHei", sans-serif;
     --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -51,7 +55,7 @@
   html, body { height: 100%; overflow: hidden; }
   body {
     background: var(--bg); color: var(--fg);
-    font-family: var(--font-mono); font-size: var(--fs-base); line-height: 1.5;
+    font-family: var(--font-ui); font-size: var(--fs-base); line-height: 1.5;
     display: flex; flex-direction: row; user-select: none;
   }
 
@@ -92,7 +96,7 @@
   button {
     background: #22262f; color: var(--fg); border: 1px solid var(--border);
     border-radius: 3px; padding: 2px 8px; cursor: pointer; flex: none;
-    font-family: var(--font-mono); font-size: var(--fs-md); line-height: 1.4;
+    font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.4;
   }
   button:hover { border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
@@ -210,7 +214,10 @@
   #tree .dir { color: var(--accent); }
   #tree .row.dirty .nm { color: var(--warn); }
 
-  .empty { padding: 10px 8px; color: var(--fg-dim); font-size: var(--fs-md); line-height: 1.6; }
+  .empty {
+    padding: 38px 10px; color: var(--fg-dim); font-size: var(--fs-md); line-height: 1.7;
+    text-align: center;
+  }
   .empty code { color: var(--fg); font-size: var(--fs-sm); }
 
   /* ── footer hints ── */
@@ -264,7 +271,7 @@
   input  input#filterBox {
     width: 100%; background: var(--bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 3px; outline: none;
-    padding: 3px 7px; font-family: var(--font-mono); font-size: var(--fs-md);
+    padding: 3px 7px; font-family: var(--font-ui); font-size: var(--fs-md);
   }
   input#filterBox:focus { border-color: var(--accent); }
   input#filterBox::placeholder { color: var(--fg-dim); }
