@@ -516,6 +516,24 @@ export class WindowManager {
     this.sidebarView?.setVisible(this.prefs.sidebarVisible)
   }
 
+  /**
+   * Re-apply visibility AND geometry from scratch.
+   *
+   * Called once after the window is first shown. Everything before that runs
+   * against a HIDDEN window, and a view that was created, positioned and
+   * made visible while the window was hidden has historically been the one
+   * combination that could come up wrong (reported 2026-09-03: with only the
+   * status bar enabled, the bar did not appear after a restart). Re-running
+   * the whole fold on the visible window costs nothing and closes that class
+   * of failure — whatever the underlying Electron quirk does, the second,
+   * visible pass draws the same rectangles the arithmetic already guarantees.
+   */
+  applyVisibilityAndLayout(): void {
+    if (!this.panelView && !this.contentView) return
+    this.applyVisibility()
+    this.layout()
+  }
+
   /** Tear down views. Call when the window closes. */
   destroy(): void {
     for (const view of [this.contentView, this.panelView, this.statusView, this.sidebarView, this.logbarView]) {

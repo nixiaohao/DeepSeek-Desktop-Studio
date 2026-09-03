@@ -148,25 +148,14 @@ contextBridge.exposeInMainWorld('dshPanel', {
 
   // ── agent stats (dsh mux projections, main + subagents) ──
 
-  /** Latest aggregated stats line ('' when there is nothing to show). */
+  /** Latest aggregated status line ('' when there is nothing to show). */
   getStats: (): Promise<string> => ipcRenderer.invoke('panel:stats-now'),
 
-  /** Live stats line; pushed only when it actually changed (see ipc-registry). */
+  /** Live status line; pushed only when it actually changed (see ipc-registry). */
   onStats: (cb: (line: string) => void): void => {
     ipcRenderer.on('panel:stats', (_e: IpcRendererEvent, line) => cb(line))
   },
   offStats: (cb: (...args: unknown[]) => void): void => off('panel:stats', cb),
-
-  // ── cost segment (status bar; local estimate, never a bill) ──
-
-  /** Latest cost line ('' when there is nothing to show). */
-  getCost: (): Promise<string> => ipcRenderer.invoke('panel:cost-now'),
-
-  /** Live cost line; pushed only when it actually changed (see ipc-registry). */
-  onCost: (cb: (line: string) => void): void => {
-    ipcRenderer.on('panel:cost', (_e: IpcRendererEvent, line) => cb(line))
-  },
-  offCost: (cb: (...args: unknown[]) => void): void => off('panel:cost', cb),
 
   /** Format a stats aggregate locally — same implementation the push uses. */
   formatStats: (s: unknown): string => formatStatsSummary(s as never),

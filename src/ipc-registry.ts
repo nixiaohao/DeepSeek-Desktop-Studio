@@ -26,7 +26,7 @@ import { subscribeBackend, getBackendLines, getLogDir, getRecentLines, log, subs
 import type { BackendLine } from './logging.js'
 import { buildView, entryFromBackend, entryFromAgent, parseShellLine, matchesSession, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
 import type { LogEntry } from './log-model.js'
-import { aggregateStats, aggregateOverview, formatStatsSummary, formatCostSummary, estimateCost, pickPrice, parsePriceOverrides, BUILTIN_PRICES, type StatsSessionRow, type OverviewSessionRow, type CostSummary } from './stats-model.js'
+import { aggregateOverview, formatStatusLine, estimateCost, pickPrice, parsePriceOverrides, BUILTIN_PRICES, type StatsSessionRow, type OverviewSessionRow, type CostSummary, type StatusBarView } from './stats-model.js'
 import { loadPriceOverridesText } from './preferences.js'
 import { filterCommands } from './command-model.js'
 import { buildCommandList, dispatchCommand, type CommandSource } from './command-registry.js'
@@ -1275,6 +1275,8 @@ export function registerIpc(deps: IpcDeps): () => void {
         sessionId: s.sessionId,
         parentSessionId: (s as { parentSessionId?: string }).parentSessionId,
         running: s.running,
+        updatedAt: s.updatedAt,
+        agentPreset: (s as { agentPreset?: string }).agentPreset,
         stats: extra?.stats as StatsSessionRow['stats'],
         usage: extra?.usage as StatsSessionRow['usage'],
       }
@@ -1310,7 +1312,7 @@ export function registerIpc(deps: IpcDeps): () => void {
   }
 
   const pushStatsIfChanged = (): void => {
-    const line = formatStatsSummary(aggregateStats(statsRows()))
+    const line = formatStatusLine(buildStatusBarView())
     if (line === lastStatsLine) return
     lastStatsLine = line
     const view = getWindowManager()?.statusBar ?? null
@@ -1321,19 +1323,120 @@ export function registerIpc(deps: IpcDeps): () => void {
   }
 
   /** Initial fill for the status bar (same shape as the push: one line or ''). */
-  ipcMain.handle('panel:stats-now', () => formatStatsSummary(aggregateStats(statsRows())))
+  ipcMain.handle('panel:stats-now', () => formatStatusLine(buildStatusBarView()))
+
+  /** Price table: user overrides on top of the built-in DeepSeek entries. */
+  const priceEntries = () => [
+    ...parsePriceOverrides(loadPriceOverridesText()),
+    ...BUILTIN_PRICES,
+  ]
+
+  /** 元 estimate for ONE session's token buckets, or null when no price matched. */
+  const sessionCost = (
+    preset: string | undefined,
+    u: { uncachedInputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown } | undefined,
+  ): number | null => {
+    const price = pickPrice(priceEntries(), preset)
+    if (!price) return null
+    const read = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? v : undefined
+    return estimateCost(
+      {
+        uncachedInput: read(u?.uncachedInputTokens),
+        output: read(u?.outputTokens),
+        cacheRead: read(u?.cacheReadTokens),
+        cacheWrite: read(u?.cacheWriteTokens),
+      },
+      price,
+    )
+  }
 
   /**
-   * The status bar's cost segment (命中率 + 估算 ¥). The estimate uses the
-   * user's model-prices.json overrides on top of the built-in DeepSeek
-   * prices; sessions whose preset matches no entry are counted in
-   * `unmatched` and NOT billed at a guessed price.
+   * The full bottom-bar line (model | 本次/平均命中 | tokens | 费用 | 轮次 |
+   * 上下文 | 压缩阈值), assembled from the same projection rows the overview
+   * uses. "本次" is the most recently updated MAIN session; "会话/平均" folds
+   * every main session. Composed in stats-model.ts (unit-tested).
+   */
+  const buildStatusBarView = (): StatusBarView => {
+    const rows = statsRows()
+    const main = rows.filter((r) => !r.parentSessionId)
+
+    let aggTokens = 0
+    let hitNum = 0
+    let hitDen = 0
+    for (const r of main) {
+      const u = r.usage
+      if (u && typeof u === 'object') {
+        aggTokens +=
+          (typeof u.uncachedInputTokens === 'number' ? u.uncachedInputTokens : 0) +
+          (typeof u.outputTokens === 'number' ? u.outputTokens : 0) +
+          (typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : 0) +
+          (typeof u.cacheWriteTokens === 'number' ? u.cacheWriteTokens : 0)
+        hitNum += typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : 0
+        hitDen +=
+          (typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : 0) +
+          (typeof u.uncachedInputTokens === 'number' ? u.uncachedInputTokens : 0)
+      }
+    }
+    const aggHit = hitDen > 0 ? Math.round((hitNum / hitDen) * 1000) / 10 : null
+
+    // "本次": the newest main session by recency stamp. Ties keep the first —
+    // session.list is newest-first already, so the earlier row wins on a tie.
+    let active: StatsSessionRow | null = null
+    let stamp = -1
+    for (const r of main) {
+      const t = typeof r.updatedAt === 'number' ? r.updatedAt : 0
+      if (t > stamp) {
+        stamp = t
+        active = r
+      }
+    }
+
+    const activeView = active
+      ? {
+        preset: active.agentPreset,
+        turns: active.stats && typeof active.stats === 'object'
+          ? (typeof active.stats.turns === 'number' ? active.stats.turns : 0)
+          : 0,
+        tokens: active.usage && typeof active.usage === 'object'
+          ? (typeof active.usage.uncachedInputTokens === 'number' ? active.usage.uncachedInputTokens : 0) +
+            (typeof active.usage.outputTokens === 'number' ? active.usage.outputTokens : 0) +
+            (typeof active.usage.cacheReadTokens === 'number' ? active.usage.cacheReadTokens : 0) +
+            (typeof active.usage.cacheWriteTokens === 'number' ? active.usage.cacheWriteTokens : 0)
+          : 0,
+        hitRate: active.usage && typeof active.usage === 'object'
+          ? (() => {
+            const read = typeof active.usage.cacheReadTokens === 'number' ? active.usage.cacheReadTokens : 0
+            const unc = typeof active.usage.uncachedInputTokens === 'number' ? active.usage.uncachedInputTokens : 0
+            return read + unc > 0 ? Math.round((read / (read + unc)) * 1000) / 10 : null
+          })()
+          : null,
+        cost: sessionCost(active.agentPreset, active.usage),
+      }
+      : null
+
+    const costSummary = buildCostSummary()
+
+    return {
+      active: activeView,
+      agg: {
+        tokens: aggTokens,
+        hitRate: aggHit,
+        cost: costSummary.cost,
+      },
+      contextPercent: aggregateOverview(overviewRows()).contextPercent,
+      compactThreshold: 0.8, // compaction-basic DEFAULT_THRESHOLD_RATIO; not on the wire
+    }
+  }
+
+  /**
+   * The cost fold used by the overview tab (会话费用 / 平均命中). Main
+   * sessions only — a subagent's tokens are already inside its parent's
+   * bill. (The status BAR no longer uses this; it shows per-session and
+   * aggregate segments from buildStatusBarView instead.)
    */
   const buildCostSummary = (): CostSummary => {
-    const entries = [
-      ...parsePriceOverrides(loadPriceOverridesText()),
-      ...BUILTIN_PRICES,
-    ]
+    const entries = priceEntries()
     let cost = 0
     let matched = false
     let matchedName: string | null = null
@@ -1377,40 +1480,30 @@ export function registerIpc(deps: IpcDeps): () => void {
       unmatched,
     }
   }
-  let lastCostLine: string | null = null
-  const pushCostIfChanged = (): void => {
-    const line = formatCostSummary(buildCostSummary())
-    if (line === lastCostLine) return
-    lastCostLine = line
-    const view = getWindowManager()?.statusBar ?? null
-    if (!view || view.webContents.isDestroyed()) return
-    try {
-      view.webContents.send('panel:cost', line)
-    } catch { /* view destroyed mid-send */ }
-  }
-  ipcMain.handle('panel:cost-now', () => formatCostSummary(buildCostSummary()))
 
   /**
    * Session-overview aggregation for the panel's 概览 tab.
    *
    * Same projection rows as the stats segment, plus the context keys the
-   * event-store now keeps; the arithmetic lives in stats-model.ts (pure,
-   * unit-tested), this only decides which sessions contribute.
-   * (Implementation lives with statsRows above — one definition.)
+   * event-store keeps; the arithmetic lives in stats-model.ts (pure,
+   * unit-tested), this only decides which sessions contribute. The cost fold
+   * rides along so the overview can show 会话费用 without a second pull.
    */
-  ipcMain.handle('panel:overview-now', () => aggregateOverview(overviewRows()))
+  ipcMain.handle('panel:overview-now', () => ({
+    ...aggregateOverview(overviewRows()),
+    cost: buildCostSummary(),
+  }))
 
   const stream = deps.getStream?.() ?? null
   stream?.setOnChange(() => {
     revision += 1
     broadcast(getWindowManager(), 'panel:changes-rev', revision)
 
-    // Logbar agent tail + status bar stats fold. Both read the same snapshot
+    // Logbar agent tail + status bar fold. Both read the same snapshot
     // the panel revision bump just announced; each keeps its own
     // dedup/throttle so a burst of frames costs one recompute, not N sends.
     pushNewActivity()
     pushStatsIfChanged()
-    pushCostIfChanged()
 
     // System notification for each NEW pending approval. dsh already shows its
     // own modal inside the webview; the OS toast makes sure the user notices

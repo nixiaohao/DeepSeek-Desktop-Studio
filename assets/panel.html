@@ -45,6 +45,20 @@
     --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* ── scrollbars ────────────────────────────────────────────────────
+     Native webkit scrollbars are wide light-grey bars with arrow buttons
+     that glare against the dark panels (user-reported). One shared look:
+     thin, no buttons, rounded thumb close to the panel background but
+     visible at a glance, deepening on hover. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-button { width: 0; height: 0; display: none; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: #303645; border: 2px solid transparent;
+    border-radius: 5px; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #3d4456; background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: transparent; }
   html, body { height: 100%; overflow: hidden; }
   body {
     background: var(--bg); color: var(--fg);
@@ -135,6 +149,29 @@
   }
   .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
   .bar i.warn { background: var(--err); }
+  /* Context bar with a compaction-threshold tick: the bar is relative, the
+     tick sits at threshold% so "how close to 压缩" is visible without math. */
+  .bar.thresh { position: relative; }
+  .bar.thresh i { position: absolute; left: 0; }
+  .bar.thresh .tick {
+    position: absolute; top: -2px; bottom: -2px; width: 2px;
+    background: var(--warn); opacity: .9;
+  }
+  /* The status badge on the context card (充足 / 良好 / 接近压缩). */
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 9px;
+    font-size: var(--fs-sm); font-weight: 600; margin-left: 6px;
+    background: rgba(61,220,132,.14); color: var(--ok);
+  }
+  .badge.mid { background: rgba(255,180,84,.14); color: var(--warn); }
+  .badge.hot { background: rgba(255,107,107,.14); color: var(--err); }
+  /* Stacked composition bar (Token 构成): two spans side by side. */
+  .stack { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 6px 0 4px; background: #22262f; }
+  .stack .p { background: var(--accent); }
+  .stack .o { background: var(--ok); }
+  /* Two-column metric grid inside the 会话指标 card. */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 14px; }
+  .sub { color: var(--fg-dim); font-size: var(--fs-sm); }
 
   /* A pending approval outranks the change list: it is the only thing that
      actually blocks the agent. */
@@ -654,15 +691,6 @@
     return Math.round((n / 1000000) * 10) / 10 + 'M';
   }
 
-  function barRow(percent, warn) {
-    var bar = el('div', 'bar');
-    var fill = el('i');
-    fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
-    if (warn) fill.className = 'warn';
-    bar.appendChild(fill);
-    return bar;
-  }
-
   function kvRow(k, v) {
     var row = el('div', 'row');
     row.appendChild(el('span', 'k', k));
@@ -670,10 +698,27 @@
     return row;
   }
 
+  /**
+   * Compaction threshold used for the tick and the 距压缩 figure.
+   *
+   * dsh's compaction resolves thresholdRatio from the profile with a default
+   * of 0.8 and never puts the resolved value on the wire, so the page shows
+   * the documented default — same number the status bar prints.
+   */
+  var COMPACT_THRESHOLD = 0.8;
+
+  /** Context-occupancy label: 充足 → 良好 → 接近压缩 at the threshold. */
+  function ctxBadge(pct) {
+    if (pct >= COMPACT_THRESHOLD * 100) return ['接近压缩', 'hot'];
+    if (pct >= 60) return ['偏高', 'mid'];
+    return ['上下文充足', ''];
+  }
+
   function renderOverview(o) {
     var body = document.getElementById('overview-body');
     if (!o || typeof o !== 'object') return;
     var t = o.tokens || {};
+    var cost = o.cost && typeof o.cost === 'object' ? o.cost : null;
     var nothing = !o.contextUsed && !t.uncachedInput && !t.output && !t.cacheRead && !t.cacheWrite;
     body.textContent = '';
 
@@ -682,40 +727,112 @@
       return;
     }
 
-    // 上下文占用（pressureTokens，缺省退化 surfaceTokens；窗口未知时不画百分比）
+    // ── 上下文窗口 ──
+    // 已用 = provider-reported prompt of the last request (pressureTokens);
+    // 窗口 = the binding (smallest) capacity seen. 距压缩 = threshold×窗口−已用.
     var ctx = el('div', 'card');
-    ctx.appendChild(el('div', 'ct', '上下文'));
+    var ctxHead = el('div', 'ct');
+    ctxHead.appendChild(document.createTextNode('上下文窗口'));
+    if (o.contextPercent !== null && o.contextPercent !== undefined) {
+      var badge = ctxBadge(o.contextPercent);
+      ctxHead.appendChild(el('span', 'badge ' + badge[1], badge[0]));
+    }
+    ctx.appendChild(ctxHead);
+
     var ctxText = fmtTok(o.contextUsed);
     if (o.contextWindow !== null && o.contextWindow !== undefined) {
-      ctxText += ' / ' + fmtTok(o.contextWindow);
+      ctxText += '/' + fmtTok(o.contextWindow);
     }
-    ctx.appendChild(el('div', 'big', ctxText));
+    var bigRow = el('div', 'row');
+    bigRow.appendChild(el('span', 'big', ctxText));
     if (o.contextPercent !== null && o.contextPercent !== undefined) {
-      ctx.appendChild(barRow(o.contextPercent, o.contextPercent >= 80));
+      bigRow.appendChild(el('span', 'big', o.contextPercent + '%'));
     }
+    ctx.appendChild(bigRow);
+
+    if (o.contextPercent !== null && o.contextPercent !== undefined) {
+      // Bar + the threshold tick, so 距压缩 is readable at a glance.
+      var bar = el('div', 'bar thresh');
+      var fill = el('i');
+      fill.style.width = Math.max(0, Math.min(100, o.contextPercent)) + '%';
+      if (o.contextPercent >= 80) fill.className = 'warn';
+      bar.appendChild(fill);
+      var tick = el('span', 'tick');
+      tick.style.left = (COMPACT_THRESHOLD * 100) + '%';
+      bar.appendChild(tick);
+      ctx.appendChild(bar);
+    }
+
+    var usedRow = el('div', 'row');
+    usedRow.appendChild(el('span', 'k', '已用'));
+    var usedVal = fmtTok(o.contextUsed);
+    if (o.contextWindow !== null && o.contextWindow !== undefined) {
+      var headroom = o.contextWindow * COMPACT_THRESHOLD - o.contextUsed;
+      usedVal += '　·　距压缩 ' + (headroom > 0 ? fmtTok(headroom) : '0');
+    }
+    usedRow.appendChild(el('span', 'v', usedVal));
+    ctx.appendChild(usedRow);
     body.appendChild(ctx);
 
-    // 缓存命中率
-    var hit = el('div', 'card');
-    hit.appendChild(el('div', 'ct', '缓存命中率'));
-    if (o.hitRate === null || o.hitRate === undefined) {
-      hit.appendChild(el('div', 'big', '–'));
-    } else {
-      hit.appendChild(el('div', 'big', o.hitRate + '%'));
-      hit.appendChild(barRow(o.hitRate, false));
+    // ── 会话指标 ── two-column: 平均命中 | 会话费用 | 运行时间 | 请求数 | 累计 tokens
+    var metric = el('div', 'card');
+    metric.appendChild(el('div', 'ct', '会话指标'));
+    var grid = el('div', 'grid');
+    function cell(k, v, cls) {
+      var c = el('div');
+      c.appendChild(el('div', 'k', k));
+      var val = el('div', cls || 'v', v);
+      val.style.fontWeight = '600';
+      c.appendChild(val);
+      return c;
     }
-    body.appendChild(hit);
+    var costText = cost && cost.cost !== null && cost.cost !== undefined
+      ? '¥' + (cost.cost >= 100 ? Math.round(cost.cost) : Math.round(cost.cost * 100) / 100) +
+        (cost.unmatched > 0 ? '（' + cost.unmatched + ' 个会话未匹配价格）' : '')
+      : '费用不可估算';
+    grid.appendChild(cell('平均命中', o.hitRate !== null && o.hitRate !== undefined ? o.hitRate + '%' : '-'));
+    grid.appendChild(cell('会话费用', costText));
+    grid.appendChild(cell('运行时间', o.llmMs > 0 ? fmtMs(o.llmMs) : '-'));
+    grid.appendChild(cell('请求数', o.steps > 0 ? String(o.steps) : '-'));
+    grid.appendChild(cell('累计 tokens',
+      (t.uncachedInput + t.cacheRead + t.cacheWrite + t.output) > 0
+        ? fmtTok(t.uncachedInput + t.cacheRead + t.cacheWrite + t.output)
+        : '-'));
+    grid.appendChild(cell('当前会话', o.activeTurns !== null && o.activeTurns !== undefined ? o.activeTurns + ' 轮' : '-'));
+    metric.appendChild(grid);
+    body.appendChild(metric);
 
-    // Token 构成
-    var tk = el('div', 'card');
-    tk.appendChild(el('div', 'ct', 'Token 构成'));
-    tk.appendChild(kvRow('输入（未命中）', fmtTok(t.uncachedInput)));
-    tk.appendChild(kvRow('输入（缓存命中）', fmtTok(t.cacheRead)));
-    tk.appendChild(kvRow('缓存写入', fmtTok(t.cacheWrite)));
-    tk.appendChild(kvRow('输出', fmtTok(t.output)));
-    body.appendChild(tk);
+    // ── 用量分析 ── Token 构成条 + 明细（四桶 + system/tools/messages）
+    var usage = el('div', 'card');
+    usage.appendChild(el('div', 'ct', 'Token 构成'));
+    var promptSide = t.uncachedInput + t.cacheRead + t.cacheWrite;
+    var total = promptSide + t.output;
+    if (total > 0) {
+      var stack = el('div', 'stack');
+      var p = el('span', 'p');
+      p.style.width = Math.round((promptSide / total) * 100) + '%';
+      var out = el('span', 'o');
+      out.style.width = Math.round((t.output / total) * 100) + '%';
+      stack.appendChild(p);
+      stack.appendChild(out);
+      usage.appendChild(stack);
+      var legend = el('div', 'row');
+      legend.appendChild(el('span', 'k', '提示（含缓存）'));
+      legend.appendChild(el('span', 'v', fmtTok(promptSide)));
+      usage.appendChild(legend);
+      var legend2 = el('div', 'row');
+      legend2.appendChild(el('span', 'k', '输出（含推理）'));
+      legend2.appendChild(el('span', 'v', fmtTok(t.output)));
+      usage.appendChild(legend2);
+    }
+    usage.appendChild(el('div', 'sub', '明细'));
+    usage.appendChild(kvRow('输入（未命中）', fmtTok(t.uncachedInput)));
+    usage.appendChild(kvRow('输入（缓存命中）', fmtTok(t.cacheRead)));
+    usage.appendChild(kvRow('缓存写入', fmtTok(t.cacheWrite)));
+    usage.appendChild(kvRow('输出', fmtTok(t.output)));
+    body.appendChild(usage);
 
-    // 上下文构成（system / tools / messages）
+    // ── 上下文构成（system / tools / messages）──
     if (o.breakdown) {
       var bd = el('div', 'card');
       bd.appendChild(el('div', 'ct', '上下文构成'));
@@ -724,6 +841,16 @@
       bd.appendChild(kvRow('对话消息', fmtTok(o.breakdown.messages)));
       body.appendChild(bd);
     }
+  }
+
+  /** Format milliseconds as a compact duration (same shape as the shell's). */
+  function fmtMs(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return '-';
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm' + String(s % 60).padStart(2, '0') + 's';
+    return Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0') + 'm';
   }
 
   function pullOverview() {

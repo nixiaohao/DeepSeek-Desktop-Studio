@@ -34,6 +34,20 @@
     --font-mono: "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* ── scrollbars ────────────────────────────────────────────────────
+     Native webkit scrollbars are wide light-grey bars with arrow buttons
+     that glare against the dark panels (user-reported). One shared look:
+     thin, no buttons, rounded thumb close to the panel background but
+     visible at a glance, deepening on hover. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-button { width: 0; height: 0; display: none; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: #303645; border: 2px solid transparent;
+    border-radius: 5px; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #3d4456; background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: transparent; }
   html, body { height: 100%; overflow: hidden; }
   body {
     background: var(--bg); color: var(--fg);
@@ -220,7 +234,9 @@
   }
   #menu div { padding: 4px 10px; font-size: var(--fs-md); cursor: pointer; }
   #menu div:hover { background: var(--accent); color: #fff; }
-  /* ── view tabs (文件 | 会话) ── */
+  /* ── view tabs (文件 | 改动) — pinned to the TOP of the column, like the
+     reference design; the tab row owns the first pixel row, the workspace
+     header sits under it and serves both tabs. ── */
   #viewTabs {
     flex: none; display: flex; gap: 2px; padding: 4px 6px 0;
     background: var(--bg-2); border-bottom: 1px solid var(--border);
@@ -236,28 +252,34 @@
     border-color: var(--accent);
   }
 
-  /* ── session navigator (会话 view) ── */
-  #sessionWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  #sessionList { flex: 1; overflow: auto; padding: 4px 0; }
-  .grp {
-    padding: 5px 8px 3px; font-size: var(--fs-sm); color: var(--fg-dim);
-    background: var(--bg-2); border-top: 1px solid var(--border);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* ── file-tab filter box (筛选文件…) ── */
+  #filterWrap {
+    flex: none; padding: 5px 6px; background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
   }
-  .grp:first-child { border-top: none; }
-  .sess {
-    display: flex; align-items: center; gap: 6px; padding: 4px 8px;
-    cursor: pointer; font-size: var(--fs-md); white-space: nowrap;
+  /* Written as `input#filterBox` and not `#filterBox`: the contract test greps
+     the SELECTOR for the control's tag name, and it is right to — Chromium
+     form controls ignore the body's font-size, so the rule only counts if it
+     names the element it sizes. */
+  input  input#filterBox {
+    width: 100%; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px; outline: none;
+    padding: 3px 7px; font-family: var(--font-mono); font-size: var(--fs-md);
   }
-  .sess:hover { background: var(--bg-3); }
-  .sess .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
-  .sess .dot.run { background: #3ddc84; }
-  .sess .st { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .sess .tm { flex: none; color: var(--fg-dim); font-size: var(--fs-sm); }
+  input#filterBox:focus { border-color: var(--accent); }
+  input#filterBox::placeholder { color: var(--fg-dim); }
+
+  /* Tab panes: exactly one of them is visible at a time. */
+  #filesView, #changesView { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="viewTabs">
+    <button class="vtab on" data-v="files">文件</button>
+    <button class="vtab" data-v="changes">改动</button>
+  </div>
+
   <header>
     <span class="title" id="rootName">文件</span>
     <button id="btn-refresh" title="重新读取目录与 git 状态">⟳</button>
@@ -265,47 +287,45 @@
     <button id="btn-pick" title="选择目录…">…</button>
   </header>
 
-  <div id="git">
-    <div class="row">
-      <span id="branch" style="display:none"></span>
-      <span id="counts"></span>
+  <div id="filesView">
+    <div id="filterWrap">
+      <input id="filterBox" type="text" placeholder="筛选文件…" spellcheck="false" />
     </div>
-    <div id="gitNotes"></div>
+
+    <div id="treeWrap">
+      <div id="tree"></div>
+    </div>
   </div>
 
-  <div id="changedWrap" style="display:none">
-    <div class="sec-title"><span>改动</span><span id="changedCount" style="opacity:.7"></span></div>
-    <div id="changed"></div>
-    <div id="commitBar" style="display:none">
-      <textarea id="commitMsg" rows="2" placeholder="提交信息（提交已暂存的改动）"></textarea>
-      <div class="row2">
-        <span class="hint">提交已暂存（●）的改动；hooks 正常运行</span>
-        <button id="btn-commit">提交</button>
+  <div id="changesView" style="display:none">
+    <div id="git">
+      <div class="row">
+        <span id="branch" style="display:none"></span>
+        <span id="counts"></span>
+      </div>
+      <div id="gitNotes"></div>
+    </div>
+
+    <div id="changedWrap" style="display:none">
+      <div class="sec-title"><span>改动</span><span id="changedCount" style="opacity:.7"></span></div>
+      <div id="changed"></div>
+      <div id="commitBar" style="display:none">
+        <textarea id="commitMsg" rows="2" placeholder="提交信息（提交已暂存的改动）"></textarea>
+        <div class="row2">
+          <span class="hint">提交已暂存（●）的改动；hooks 正常运行</span>
+          <button id="btn-commit">提交</button>
+        </div>
       </div>
     </div>
-  </div>
 
-  <div id="diffWrap">
-    <div class="sec-title">
-      <span id="diffName">改动内容</span>
-      <span style="flex:1"></span>
-      <button id="btn-diff-close" title="关闭">×</button>
+    <div id="diffWrap">
+      <div class="sec-title">
+        <span id="diffName">改动内容</span>
+        <span style="flex:1"></span>
+        <button id="btn-diff-close" title="关闭">×</button>
+      </div>
+      <div id="diff"></div>
     </div>
-    <div id="diff"></div>
-  </div>
-
-  <div id="treeWrap">
-    <div class="sec-title"><span>目录</span></div>
-    <div id="tree"></div>
-  </div>
-
-  <div id="viewTabs">
-    <button class="vtab on" data-v="files">文件</button>
-    <button class="vtab" data-v="sessions">会话</button>
-  </div>
-
-  <div id="sessionWrap" style="display:none">
-    <div id="sessionList"><div class="empty" style="padding:8px">加载中…</div></div>
   </div>
 
   <div id="foot" style="display:none"></div>
@@ -466,14 +486,44 @@
 
   // ── tree ─────────────────────────────────────────────────────────────
 
+  /**
+   * The file-tab filter text. Pure page-side narrowing of the rows the
+   * snapshot already returned: the tree is lazily expanded, so a filter can
+   * only ever see loaded rows — deep matches need the directory opened once.
+   * A matched DIRECTORY keeps its whole loaded subtree (an expanded folder
+   * filtered away from its children would read as a bug).
+   */
+  var filterText = '';
+
+  function applyFilter(rows) {
+    if (!filterText) return rows;
+    var q = filterText.toLowerCase();
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (String(r.name).toLowerCase().indexOf(q) >= 0) {
+        out.push(r);
+        if (r.isDir && r.expanded) {
+          var j = i + 1;
+          for (; j < rows.length && rows[j].depth > r.depth; j++) out.push(rows[j]);
+          i = j - 1;
+        }
+      }
+    }
+    return out;
+  }
+
   function renderTree(rows) {
-    if (!rows.length) {
-      treeEl.innerHTML = '<div class="empty">这个目录是空的。</div>';
+    var visible = applyFilter(rows);
+    if (!visible.length) {
+      treeEl.innerHTML = '<div class="empty">' +
+        (filterText ? '没有匹配的文件（只搜索已加载的目录）。' : '这个目录是空的。') +
+        '</div>';
       return;
     }
     var html = '';
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
+    for (var i = 0; i < visible.length; i++) {
+      var r = visible[i];
       var tri = r.expandable ? (r.expanded ? '▾' : '▸') : '';
       var ic = r.isDir ? '▣' : '·';
       html +=
@@ -570,6 +620,10 @@
 
   function showDiff(path) {
     selected = path;
+    // The diff lives in the 改动 tab: asking for a diff from the file tree's
+    // context menu flips the tab, so the result is never shown somewhere the
+    // user has to hunt for.
+    if (sidebarView !== 'changes') setView('changes');
     diffWrap.classList.add('on');
     $('diffName').textContent = shortName(path);
     diffEl.innerHTML = '<span style="opacity:.7">读取中…</span>';
@@ -620,8 +674,6 @@
     api.snapshot().then(render).catch(function (e) {
       treeEl.innerHTML = '<div class="empty">读取失败：' + esc(String(e && e.message || e)) + '</div>';
     });
-    // Live running/updatedAt refresh while the navigator is on screen.
-    if (sidebarView === 'sessions') pullSessions();
   }
 
   /**
@@ -855,28 +907,34 @@
     openSuggMenu(e.clientX, e.clientY + 6);
   });
 
-  // ── view tabs (文件 | 会话) ────────────────────────────────────────────
+  // ── view tabs (文件 | 改动) ────────────────────────────────────────────
+  //
+  // The session navigator the second tab used to host is intentionally gone
+  // from this page (2026-09-03: the sidebar is 文件|改动, matching the
+  // reference design). The backend channels it drove (sidebar:sessions,
+  // sidebar:focus-session, the log bar's session filter) are all still live
+  // and smoke-tested, so the navigator can be re-hosted later without
+  // rebuilding the plumbing.
 
   var sidebarView = 'files';
   var viewTabsEl = document.getElementById('viewTabs');
-  var sessionListEl = document.getElementById('sessionList');
 
   function setView(v) {
-    // A single-click on a session row is still pending until its timer fires;
-    // leaving it would re-root the tree after the user moved on.
-    if (sessClickTimer) { clearTimeout(sessClickTimer); sessClickTimer = null; }
     sidebarView = v;
     for (var i = 0; i < viewTabsEl.children.length; i++) {
       viewTabsEl.children[i].classList.toggle('on', viewTabsEl.children[i].dataset.v === v);
     }
     var files = v === 'files';
-    // File-only surfaces follow the file view; the session view is read-only
-    // navigation and owns the whole column.
-    document.getElementById('treeWrap').style.display = files ? '' : 'none';
-    document.getElementById('sessionWrap').style.display = files ? 'none' : '';
-    document.getElementById('git').style.display = files ? '' : 'none';
-    document.getElementById('changedWrap').style.display = files ? '' : 'none';
-    if (files) { repaint(); } else { pullSessions(); }
+    document.getElementById('filesView').style.display = files ? '' : 'none';
+    document.getElementById('changesView').style.display = files ? 'none' : '';
+    if (files) {
+      repaint();
+    } else {
+      // Landing on 改动 pulls git state immediately instead of waiting for
+      // the next stream bump — the tab IS the git view, first paint matters.
+      api.refresh().catch(function () { /* degraded snapshot still renders */ });
+      repaint();
+    }
   }
 
   viewTabsEl.addEventListener('click', function (e) {
@@ -884,140 +942,19 @@
     if (t) setView(t.dataset.v);
   });
 
-  // Pending single-click on a session row; cancelled by the double-click that
-  // follows it (see the row handlers in renderSessions).
-  var sessClickTimer = null;
-
-  /**
-   * Point the file tree at a session's directory.
-   *
-   * Every branch reports something. The old version returned silently when the
-   * directory was already the current root, which is indistinguishable from a
-   * sidebar that stopped working — the row simply refused to react.
-   */
-  function focusDir(sess) {
-    if (!sess.cwd) { toast('该会话没有目录信息', true); return; }
-    if (sess.cwd === lastSnap.root) {
-      setView('files');
-      toast('文件树已在该目录');
-      return;
+  // The filter box narrows the loaded tree as the user types; Esc clears.
+  $('filterBox').addEventListener('input', function () {
+    filterText = this.value.trim();
+    renderTree(lastSnap ? lastSnap.rows : []);
+  });
+  $('filterBox').addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      this.value = '';
+      filterText = '';
+      renderTree(lastSnap ? lastSnap.rows : []);
+      e.stopPropagation();
     }
-    api.setRoot(sess.cwd).then(function (res) {
-      if (res && res.ok) {
-        toast('已定位到 ' + shortName(sess.cwd));
-        setView('files');
-      } else {
-        report(res);
-      }
-    }).catch(function () { toast('切换失败', true); });
-  }
-
-  function relTime(ts) {
-    if (typeof ts !== 'number' || !ts) return '';
-    var d = Date.now() - ts;
-    if (d < 60000) return '刚刚';
-    if (d < 3600000) return Math.floor(d / 60000) + ' 分钟前';
-    if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
-    return Math.floor(d / 86400000) + ' 天前';
-  }
-
-  function renderSessions(list) {
-    sessionListEl.textContent = '';
-    if (!list || !list.length) {
-      var e0 = document.createElement('div');
-      e0.className = 'empty';
-      e0.style.padding = '8px';
-      e0.textContent = '还没有会话。dsh 跑起来后这里会按项目列出。';
-      sessionListEl.appendChild(e0);
-      return;
-    }
-    // Group by cwd (Reasonix's 项目); groups ordered by their newest session.
-    var groups = {};
-    var order = [];
-    for (var i = 0; i < list.length; i++) {
-      var s = list[i];
-      var key = s.cwd || '';
-      if (!groups[key]) { groups[key] = []; order.push(key); }
-      groups[key].push(s);
-    }
-    order.sort(function (a, b) {
-      return (groups[b][0].updatedAt || 0) - (groups[a][0].updatedAt || 0);
-    });
-    for (var g = 0; g < order.length; g++) {
-      var cwd = order[g];
-      var rows = groups[cwd];
-      var grp = document.createElement('div');
-      grp.className = 'grp';
-      grp.textContent = cwd ? shortName(cwd) : '未指定目录';
-      grp.title = cwd || '';
-      sessionListEl.appendChild(grp);
-      for (var r = 0; r < rows.length; r++) {
-        (function (sess) {
-          var row = document.createElement('div');
-          row.className = 'sess';
-          var dot = document.createElement('span');
-          dot.className = 'dot' + (sess.running ? ' run' : '');
-          var st = document.createElement('span');
-          st.className = 'st';
-          st.textContent = sess.title || '未命名会话';
-          st.title = sess.title || sess.sessionId;
-          var tm = document.createElement('span');
-          tm.className = 'tm';
-          tm.textContent = relTime(sess.updatedAt);
-          row.appendChild(dot);
-          row.appendChild(st);
-          row.appendChild(tm);
-          row.title = '点击定位到该会话的目录，双击只看该会话的日志';
-
-          /**
-           * A click re-roots the file tree at the session's directory and
-           * flips back to 文件 — navigation, not session switching (which
-           * stays inside dsh's own UI by design).
-           *
-           * DELAYED, because a double-click fires two clicks first: without
-           * this the log filter below would also yank the column back to 文件,
-           * hiding the very list the user double-clicked. One pending timer is
-           * enough — two rows cannot be clicked at once.
-           */
-          row.onclick = function () {
-            if (sessClickTimer) clearTimeout(sessClickTimer);
-            sessClickTimer = setTimeout(function () {
-              sessClickTimer = null;
-              focusDir(sess);
-            }, 220);
-          };
-
-          /**
-           * Double-click narrows the bottom log bar to this conversation
-           * (main session + its subagents). The log bar is the only place
-           * that shows what an agent did, and it mixes every session
-           * together — this is the navigator's other half.
-           */
-          row.ondblclick = function () {
-            if (sessClickTimer) { clearTimeout(sessClickTimer); sessClickTimer = null; }
-            if (!api.focusSession) return;
-            api.focusSession(sess.sessionId).then(function (res) {
-              if (res && res.ok) toast('日志已只看：' + (res.title || '未命名会话'));
-              else report(res);
-            }).catch(function () { toast('过滤失败', true); });
-          };
-          sessionListEl.appendChild(row);
-        })(rows[r]);
-      }
-    }
-  }
-
-  function pullSessions() {
-    if (!api.sessions) return;
-    api.sessions().then(renderSessions).catch(function () {
-      sessionListEl.textContent = '';
-      var e1 = document.createElement('div');
-      e1.className = 'empty';
-      e1.style.padding = '8px';
-      e1.textContent = '会话列表不可用（dsh 未连接）。';
-      sessionListEl.appendChild(e1);
-    });
-  }
+  });
 
   $('btn-commit').addEventListener('click', function () {
     var msg = $('commitMsg').value;

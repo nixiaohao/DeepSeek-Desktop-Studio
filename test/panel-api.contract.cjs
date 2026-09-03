@@ -511,6 +511,100 @@ for (const asset of RESIZER_PAGES) {
   )
 }
 
+// ── 3b3. Themed scrollbars on every shell page ────────────────────────
+
+/**
+ * Native Chromium scrollbars are wide light-grey bars with arrow buttons that
+ * glare against the dark panels — reported 2026-09-03 as "丑". Every shell page
+ * therefore restates ONE shared look: thin, no buttons, rounded thumb close to
+ * the panel background but still visible.
+ *
+ * This list is explicit and includes the pages that are not in ALL_PAGES
+ * (diagnostics, settings, command palette each have their own preload).
+ */
+{
+  const pages = [
+    'panel.html',
+    'sidebar.html',
+    'statusbar.html',
+    'logbar.html',
+    'command-palette.html',
+    'diagnostics.html',
+    'settings.html',
+  ]
+  for (const name of pages) {
+    const asset = path.join('assets', name)
+    // Same extraction as the type-scale check below: comments stripped first,
+    // because the prose in these files quotes the declarations under test.
+    const style = /<style>([\s\S]*?)<\/style>/.exec(read(asset))
+    assert(style !== null, `${asset} has a <style> block`, `${asset} has no inline <style>`)
+    if (!style) continue
+    const css = style[1].replace(/\/\*[\s\S]*?\*\//g, '')
+
+    assert(
+      /::-webkit-scrollbar-thumb\s*\{/.test(css),
+      `${asset} styles the scrollbar thumb`,
+      `${asset} leaves the native thumb — a light-grey bar with arrow buttons on a dark panel`
+    )
+    const thumb = (css.match(/::-webkit-scrollbar-thumb\s*\{([^}]*)\}/) || [])[1] || ''
+    assert(
+      /border-radius/.test(thumb),
+      `${asset} rounds the scrollbar thumb`,
+      `${asset}'s thumb has square corners — it reads as a native widget, not part of the skin`
+    )
+    assert(
+      !/background:\s*#(f{3,6}|e[0-9a-f]{2}|e{6}|d[0-9a-f]{2})\b/i.test(thumb),
+      `${asset}'s scrollbar thumb is not near-white`,
+      `${asset}'s thumb is lighter than the panel — the glare the user reported`
+    )
+    assert(
+      /::-webkit-scrollbar-button\s*\{[^}]*(display:\s*none|width:\s*0)/.test(css),
+      `${asset} hides the scrollbar arrow buttons`,
+      `${asset} keeps native arrow buttons, which is what makes the bar read as an OS widget`
+    )
+  }
+}
+
+// ── 3b4. Sidebar tabs are 文件|改动, with the tab row on top ─────────────
+
+/**
+ * The sidebar used to be a stack (tree + git + changes in one column) with a
+ * 文件|会话 tab row pinned at the BOTTOM. Re-laid out 2026-09-03 to match the
+ * reference design: two tabs (文件 / 改动) at the top, each owning the column.
+ * The session navigator is gone from this page; its channels remain live.
+ */
+{
+  const asset = path.join('assets', 'sidebar.html')
+  const html = read(asset)
+
+  assert(
+    /data-v="files"/.test(html) && /data-v="changes"/.test(html),
+    'sidebar.html has exactly the 文件 and 改动 tabs',
+    'the sidebar tab pair drifted from 文件|改动 — the layout the user asked for'
+  )
+  assert(
+    !/data-v="sessions"|data-v='sessions'/.test(html),
+    'sidebar.html no longer offers the 会话 tab',
+    'the session navigator came back in the sidebar; it belongs to a later feature decision'
+  )
+  // Tab row BEFORE the panes: it is the switcher, it must be the first thing
+  // in the column, not a footer tab the user has to hunt for.
+  const tabAt = html.indexOf('id="viewTabs"')
+  const filesAt = html.indexOf('id="filesView"')
+  const changesAt = html.indexOf('id="changesView"')
+  assert(
+    tabAt > -1 && filesAt > -1 && changesAt > -1 && tabAt < filesAt && tabAt < changesAt,
+    'the sidebar tab row sits above both panes',
+    'viewTabs is not before filesView/changesView — the tab row fell to the bottom again'
+  )
+  // The filter box belongs to the file pane (it filters the tree).
+  assert(
+    /id="filterBox"/.test(html) && /filterText|applyFilter/.test(html),
+    'sidebar.html filters the file tree from an input',
+    'the 筛选文件… box or its filtering logic disappeared'
+  )
+}
+
 // ── 3c. Panel type scale ──
 
 /**
@@ -631,6 +725,45 @@ for (const asset of TYPE_SCALE_PAGES) {
       covered,
       `${asset}: <${tag}> takes its font-size from an --fs-* token`,
       `${asset} builds <${tag}> but no rule gives it a font-size from the type scale — Chromium form controls do not inherit body font, so it renders at the browser default (~11px)`
+    )
+  }
+
+  // ── Scrollbars are part of the skin ──
+  //
+  // Native webkit scrollbars (wide grey bars with arrow buttons) glare against
+  // the dark panels — the user's word was that they look nothing like the
+  // theme. Every page that can scroll therefore carries one shared look: thin
+  // (10px), no track, no buttons, a rounded thumb close to the panel colour
+  // that deepens on hover. A bare `::-webkit-scrollbar { width }` that leaves
+  // the rest default is a regression — the whole set must be present.
+  assert(
+    /::-webkit-scrollbar-button\s*\{[^}]*display:\s*none/.test(css),
+    `${asset}: scrollbar arrow buttons are suppressed`,
+    `${asset} reverted to native scrollbar buttons — the glare the skin was added to kill is back`
+  )
+  assert(
+    /::-webkit-scrollbar-thumb\s*\{[^}]*border-radius:[^;}]*;/s.test(css),
+    `${asset}: scrollbar thumb is rounded`,
+    `${asset} lost the rounded scrollbar thumb`
+  )
+  const thumb = /::-webkit-scrollbar-thumb\s*\{([^}]*)\}/s.exec(css)
+  if (thumb) {
+    const body = thumb[1]
+    assert(
+      /background-clip:\s*padding-box/.test(body),
+      `${asset}: scrollbar thumb is inset (border padding-box)`,
+      `${asset} scrollbar thumb draws to the track edge — restore background-clip: padding-box with a 2px transparent border`
+    )
+    assert(
+      /border:\s*2px solid transparent/.test(body),
+      `${asset}: scrollbar thumb carries a 2px transparent border`,
+      `${asset} scrollbar thumb is full-bleed — it needs the 2px transparent border to read as slim`
+    )
+    const hex = /background:\s*(#[0-9a-fA-F]{6})/.exec(body)
+    assert(
+      hex !== null,
+      `${asset}: scrollbar thumb uses an explicit colour`,
+      `${asset} scrollbar thumb has no concrete colour — set one so the look is intentional, not inherited`
     )
   }
 }

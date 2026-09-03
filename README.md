@@ -15,20 +15,23 @@ the agent.
 
 ### Workbench layout
 
-- **File/git sidebar** (left) — directory tree with change badges, one-click
-  diff with lightweight syntax highlighting, and the dsh session directories
-  as one-click workspace suggestions. Its **Sessions** tab lists dsh's
-  sessions grouped by project: click one to re-root the tree at its
-  directory, double-click to narrow the log bar to that conversation's agent
-  activity (subagents included).
-- **Monitoring panel** (right) — change review with per-tool approval and
-  batch allow/reject, backend health readout, and the backend's raw output.
+- **Sidebar** (left) — two tabs: **Files** (directory tree with change badges,
+  plus a filter box — type to narrow the loaded tree to matching paths) and
+  **Changes** (git status strip, changed files with per-row stage/unstage, a
+  guarded commit bar, branch switching and one-click diffs). Files can also be
+  right-clicked and sent to the dsh conversation.
+- **Monitoring panel** (right) — two tabs: **Change review** (per-tool
+  approval and batch allow/reject) and **Session overview** (context window
+  with used/limit, a compaction-threshold tick and distance-to-compaction,
+  plus hit rate, session cost, running time, request count, cumulative tokens,
+  and token/context composition).
 - **Bottom log bar** — shell, backend and agent activity in one place, with
-  per-source filters, a session filter set from the sidebar's Sessions tab,
-  and drag-to-resize.
-- **Status bar** — dsh version/port/channel, plus live aggregated agent
-  stats (LLM time, tool time, tokens up/down, subagent count) covering main
-  and subagents alike.
+  per-source filters and drag-to-resize. (The per-session narrowing the old
+  navigator drove is still wired on the backend, awaiting a UI home.)
+- **Status bar** — dsh version/port/channel, plus a Reasonix-style readout:
+  model, per-request and average cache hit rate, session/per-request tokens,
+  per-request/session cost (locally estimated), current-session turns, context
+  occupancy, and the 80% compaction threshold.
 - Every panel can be toggled, resized and persisted; the layout degrades
   gracefully on small windows (panels collapse instead of squeezing the dsh
   page below its usable minimum).
@@ -176,10 +179,10 @@ DeepSeek Desktop Studio 把 `dsh` 命令行工作流封装成原生桌面应用�
 
 #### 工作台布局
 
-- **文件/git 侧栏**（左）—— 带变更徽标的目录树、一键 diff（轻量语法高亮）、dsh 会话目录一键切换工作区。**会话**页按项目分组列出 dsh 会话：点击定位到该会话目录，双击把日志面板收窄到该会话的 agent 活动（含子 agent）。
-- **监控面板**（右）—— 变更审查（按工具审批、批量允许/拒绝）、后端健康读数、后端原始输出。
-- **底部日志面板** —— shell、后端、agent 活动三源合一，按来源过滤，也可按会话过滤（由侧栏会话页双击设定），顶部拖拽调高。
-- **状态栏** —— dsh 版本/端口/通道，加上实时聚合的 agent 统计（LLM 耗时、工具耗时、↑↓ token、子 agent 数），主 agent 与子 agent 一并覆盖。
+- **侧栏**（左）—— 两个页签：**文件**（目录树、顶部筛选框——输入即收窄到已加载目录中的匹配文件；改动文件的 git 徽标仍在树上一目了然）与**改动**（git 状态条、改动列表、逐行暂存/取消暂存、带护栏的提交栏、分支切换、一键 diff）。右键文件还可「添加到 dsh 对话」。
+- **监控面板**（右）—— **变更审阅**（按工具审批、批量允许/拒绝）与**会话概览**两个页签：上下文窗口（已用/窗口、压缩阈值刻度、距压缩余量）、会话指标（平均命中、会话费用、运行时间、请求数、累计 tokens）、Token 构成与上下文构成明细。
+- **底部日志面板** —— shell、后端、agent 活动三源合一，按来源过滤，顶部拖拽调高。（按会话收窄日志的后端通道仍可用，等待重新挂回 UI。）
+- **状态栏** —— dsh 版本/端口/通道，加上一行 Reasonix 风格读数：模型、本次/平均缓存命中、会话/本次 tokens、本次/会话费用（本地估算）、当前会话轮数、上下文占用、压缩阈值 80%。
 - 每个面板都可显隐、拖拽、持久化；小窗口下优雅降级（面板塌缩，而不是把 dsh 页面挤到不可用）。
 
 #### git 面板（带护栏）
@@ -276,6 +279,41 @@ Linux 需要 `dpkg`/`fakeroot`，请在 Linux 容器（`node:22-bookworm`）内�
 本项目构建于 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（MIT © 2026 DeepSeek）之上。完整文本见 `LICENSE`。
 
 ## Changelog / 更新日志
+
+### Unreleased (after v0.2.0)
+
+**English**
+- Changed: the sidebar is now **文件 | 改动** (Files | Changes) — the file
+  tree gained a filter box and moved to its own tab, and everything git
+  (status strip, changed files, commit bar, branch switch, diffs) lives on
+  the Changes tab. The session navigator's UI was retired from the sidebar;
+  the backend channels it drove remain live and tested.
+- Added: a Reasonix-style session overview — context window card (used/limit,
+  compaction-threshold tick, distance to compaction), session metrics
+  (average hit rate, session cost, running time, request count, cumulative
+  tokens, current-session turns) and a token-composition bar with per-bucket
+  details.
+- Added: the status bar now shows one labelled readout — model, per-request
+  and average cache hit rate, session/per-request tokens, per-request/session
+  estimated cost, current-session turns, context occupancy and the 80%
+  compaction threshold. The old terse groups (and the "子agent N" counter)
+  are gone.
+- Fixed: with only the status bar enabled the bar could come up missing after
+  a restart — visibility and geometry are now re-applied once the window is
+  first shown.
+- Changed: every panel page now skins its scrollbars (thin, no arrow
+  buttons, rounded thumbs close to the panel colour) — native grey bars no
+  longer glare against the dark surfaces.
+- Internal: the overview/status-line aggregation gained pure-model unit
+  tests and the contract suite now pins the shared scrollbar skin.
+
+**中文**
+- 变更：侧栏改为**文件 | 改动**两个页签——文件树加顶部筛选框并独占「文件」页，git 相关（状态条、改动列表、提交栏、切分支、diff）全部收进「改动」页；会话导航 UI 从侧栏撤下（它驱动的后端通道仍保留并有测试覆盖）。
+- 新增：Reasonix 式会话概览——上下文窗口卡（已用/上限、压缩阈值刻度、距压缩余量）、会话指标（平均命中、会话费用、运行时间、请求数、累计 tokens、当前会话轮数）、Token 构成条与分桶明细。
+- 新增：状态栏改为一行带标签读数——模型、本次/平均命中、会话/本次 tokens、本次/会话费用（本地估算）、当前会话轮数、上下文占用、压缩阈值 80%；旧的紧凑分组（含「子agent N」计数）移除。
+- 修复：只勾选状态栏时重启后状态栏可能不出现——窗口首次显示后现在会重放一次可见性与布局。
+- 变更：全部面板页统一滚动条皮肤（细、无箭头按钮、圆角滑块、贴近面板底色）——原生灰色滚动条不再在深色面板上刺眼。
+- 内部：概览/状态栏聚合补纯模型单测；契约套件新增对滚动条皮肤与状态栏新管线的防回归检查。
 
 ### v0.2.0 — 2026-09-03（首次公开发布 / first public release）
 

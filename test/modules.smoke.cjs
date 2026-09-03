@@ -1223,6 +1223,70 @@ async function checkSettingsPolicy() {
   )
 }
 
+/**
+ * The status bar's full line must come from the Reasonix-style formatter,
+ * not from the old quiet-group summary. Both arrive over `panel:stats` with
+ * no shape guarantee beyond "a string", so the format is pinned here by
+ * driving the REAL `panel:stats-now` handler with canned projections.
+ */
+async function checkStatusBarLine() {
+  console.log('modules: status bar full line')
+
+  const sessions = [
+    { sessionId: 'main-1', cwd: 'D:/proj', running: true, updatedAt: 20, agentPreset: 'deepseek-chat' },
+    { sessionId: 'sub-1', parentSessionId: 'main-1', running: true, updatedAt: 99, agentPreset: 'ghost' },
+  ]
+  const projections = [
+    { sessionId: 'main-1', key: 'sessionStats', value: { turns: 3, steps: 8, llmMs: 4000, toolMs: 900 } },
+    {
+      sessionId: 'main-1',
+      key: 'tokenUsage',
+      value: { uncachedInputTokens: 10_000, cacheReadTokens: 90_000, cacheWriteTokens: 5000, outputTokens: 40_000 },
+    },
+    { sessionId: 'main-1', key: 'contextPressure', value: { contextWindow: 1_000_000, pressureTokens: 10_000 } },
+    { sessionId: 'sub-1', key: 'tokenUsage', value: { uncachedInputTokens: 999, outputTokens: 1 } },
+  ]
+  const statusStream = {
+    setOnChange: () => {},
+    panelSnapshot: () => ({ changes: [], approvals: [], sessions, dropped: 0, connected: true }),
+    approvals: () => [],
+    sessions: () => sessions,
+    snapshot: () => ({ sessions, activity: [] }),
+    store: { snapshot: () => ({ sessions }), projectionEntries: () => projections },
+  }
+
+  const teardown = registerIpc({
+    getWindowManager: () => null,
+    getHealthMonitor: () => null,
+    getStream: () => statusStream,
+    getAppVersion: () => '0.0.0-smoke',
+    restartBackend: async () => ({ ok: true }),
+    getStatusInfo: () => ({ version: 'x', port: null, channel: 'next' }),
+    quitApp: () => {},
+  })
+
+  try {
+    const statsNow = ipcChannels.handlers.get('panel:stats-now')
+    assert(typeof statsNow === 'function', 'panel:stats-now has a handler we can drive', 'no handler captured')
+    const line = await statsNow(null)
+    assert(typeof line === 'string' && line.length > 0, 'the line is non-empty once a session has usage', JSON.stringify(line))
+
+    // The labelled segments are the contract (the page renders this string).
+    for (const marker of ['deepseek-chat', '本次命中 90%', '平均命中 90%', '会话 tokens 145k', '本次 tokens 145k',
+      '本次费用 ¥', '当前会话 3 轮', '压缩阈值 80%', '会话费用 ¥']) {
+      assert(line.includes(marker), `line carries "${marker}"`, JSON.stringify(line))
+    }
+    // The old summary rendered plain groups with · separators and no labels;
+    // a regression to it would not contain a single "|".
+    assert(line.includes('|'), 'the line is the new | separated form, not the old quiet-group summary', JSON.stringify(line))
+    // Aggregates count MAIN sessions only: the subagent's 999 tokens must not
+    // show up in the 会话 tokens figure.
+    assert(!line.includes('146k'), 'the fold skips subagent tokens', JSON.stringify(line))
+  } finally {
+    teardown()
+  }
+}
+
 function finalize() {
   // Belt and braces: even with the uncaughtException guard above, assert that the
   // whole file actually ran. An early abort used to be indistinguishable from a
@@ -1252,6 +1316,11 @@ checkBatchGuard()
   .catch((err) => {
     fail += 1
     console.error(`  FAIL session log filter threw: ${err && err.message}`)
+  })
+  .then(checkStatusBarLine)
+  .catch((err) => {
+    fail += 1
+    console.error(`  FAIL status bar line threw: ${err && err.message}`)
   })
   .then(checkLayoutPolicy)
   .catch((err) => {

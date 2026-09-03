@@ -31,6 +31,20 @@
     --fg-dim: var(--dim);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* ── scrollbars ────────────────────────────────────────────────────
+     Native webkit scrollbars are wide light-grey bars with arrow buttons
+     that glare against the dark panels (user-reported). One shared look:
+     thin, no buttons, rounded thumb close to the panel background but
+     visible at a glance, deepening on hover. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-button { width: 0; height: 0; display: none; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: #303645; border: 2px solid transparent;
+    border-radius: 5px; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #3d4456; background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: transparent; }
   html, body { height: 100%; overflow: hidden; }
   body {
     background: var(--bg); color: var(--fg);

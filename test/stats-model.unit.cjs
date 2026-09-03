@@ -16,6 +16,7 @@ const {
   formatDuration,
   formatTokens,
   formatStatsSummary,
+  formatStatusLine,
   parsePriceOverrides,
   pickPrice,
   BUILTIN_PRICES,
@@ -144,16 +145,16 @@ check('no input at all leaves hitRate null instead of NaN', () => {
 
 check('context occupancy prefers pressureTokens and reports percent of window', () => {
   const o = aggregateOverview([overviewRow({
-    contextPressure: { contextWindow: 1000, pressureTokens: 120, surfaceTokens: 90 },
+    contextPressure: { contextWindow: 1000, pressureTokens: 120, projectedTokens: 90 },
   })])
   assert.equal(o.contextUsed, 120)
   assert.equal(o.contextWindow, 1000)
   assert.equal(o.contextPercent, 12)
 })
 
-check('context falls back to surfaceTokens when pressure is absent', () => {
+check('context falls back to projectedTokens when pressure is absent', () => {
   const o = aggregateOverview([overviewRow({
-    contextPressure: { surfaceTokens: 90 },
+    contextPressure: { projectedTokens: 90 },
   })])
   assert.equal(o.contextUsed, 90)
   assert.equal(o.contextWindow, null)
@@ -180,6 +181,118 @@ check('breakdown sums composition; junk fields contribute zero', () => {
   ])
   assert.deepEqual(o.breakdown, { system: 500, tools: 1200, messages: 3200 })
   assert.equal(o.tokens.uncachedInput, 0)
+})
+
+check('overview folds llmMs/steps over every session', () => {
+  const o = aggregateOverview([
+    overviewRow({ stats: { llmMs: 300_000, steps: 4, turns: 3 } }),
+    overviewRow({ parentSessionId: 'p', stats: { llmMs: 60_000, steps: 2, turns: 1 } }),
+  ])
+  assert.equal(o.llmMs, 360_000)
+  assert.equal(o.steps, 6)
+})
+
+check('active figures come from the newest MAIN session only', () => {
+  const o = aggregateOverview([
+    overviewRow({
+      sessionId: 'old', updatedAt: 10, agentPreset: 'deepseek-chat',
+      stats: { turns: 9 },
+      usage: { uncachedInputTokens: 100, cacheReadTokens: 300, outputTokens: 40 },
+    }),
+    overviewRow({
+      sessionId: 'new', updatedAt: 20, agentPreset: 'flash',
+      stats: { turns: 2 },
+      usage: { uncachedInputTokens: 10, cacheReadTokens: 30, outputTokens: 4 },
+    }),
+    overviewRow({
+      // newest of all, but a subagent — never the "current session"
+      sessionId: 'sub', parentSessionId: 'new', updatedAt: 99, agentPreset: 'ghost',
+      stats: { turns: 77 },
+      usage: { uncachedInputTokens: 999 },
+    }),
+  ])
+  assert.equal(o.activeTurns, 2)
+  assert.equal(o.activePreset, 'flash')
+  assert.equal(o.activeTokens, 44)
+  assert.equal(o.activeHitRate, 75) // 30 / (30+10)
+})
+
+check('active fields degrade independently when projections are missing', () => {
+  const o = aggregateOverview([
+    overviewRow({ sessionId: 'bare', updatedAt: 5, agentPreset: 'flash' }),
+  ])
+  assert.equal(o.activeTurns, null)
+  assert.equal(o.activePreset, 'flash')
+  assert.equal(o.activeTokens, 0)
+  assert.equal(o.activeHitRate, null)
+})
+
+// ── formatStatusLine (the Reasonix-style bottom bar) ──
+
+check('formatStatusLine returns empty when nothing has been seen', () => {
+  assert.equal(formatStatusLine(null), '')
+  assert.equal(formatStatusLine(undefined), '')
+  assert.equal(formatStatusLine({
+    active: null,
+    agg: { tokens: 0, hitRate: null, cost: null },
+    contextPercent: null,
+    compactThreshold: 0.8,
+  }), '')
+  // An active session that has produced nothing observable is "nothing" too.
+  assert.equal(formatStatusLine({
+    active: { turns: 0, tokens: 0, hitRate: null, cost: null },
+    agg: { tokens: 0, hitRate: null, cost: null },
+    contextPercent: null,
+    compactThreshold: 0.8,
+  }), '')
+})
+
+check('formatStatusLine renders every segment in the reference order', () => {
+  const line = formatStatusLine({
+    active: { preset: 'deepseek-v4-flash + plan', turns: 3, tokens: 44_000, hitRate: 75, cost: 0.1234 },
+    agg: { tokens: 657_000, hitRate: 94.2, cost: 3.9 },
+    contextPercent: 1,
+    compactThreshold: 0.8,
+  })
+  assert.equal(
+    line,
+    'deepseek-v4-flash + plan | 本次命中 75% | 平均命中 94.2% | 会话 tokens 657k | ' +
+    '本次 tokens 44k | 本次费用 ¥0.123 | 当前会话 3 轮 | 上下文 1% | 压缩阈值 80% | 会话费用 ¥3.9',
+  )
+})
+
+check('formatStatusLine shows dashes for missing values, never zeros', () => {
+  const line = formatStatusLine({
+    active: { preset: 'flash', turns: 1, tokens: 0, hitRate: null, cost: null },
+    agg: { tokens: 0, hitRate: null, cost: null },
+    contextPercent: null,
+    compactThreshold: 0.8,
+  })
+  assert.equal(
+    line,
+    'flash | 本次命中 - | 平均命中 - | 会话 tokens - | 本次 tokens - | 本次费用 - | ' +
+    '当前会话 1 轮 | 上下文 - | 压缩阈值 80% | 会话费用 -',
+  )
+})
+
+check('formatStatusLine keeps the bar alive on context alone', () => {
+  const line = formatStatusLine({
+    active: null,
+    agg: { tokens: 0, hitRate: null, cost: null },
+    contextPercent: 42,
+    compactThreshold: 0.8,
+  })
+  assert.ok(line.includes('上下文 42%'), line)
+})
+
+check('formatStatusLine renders the threshold from the fraction given', () => {
+  const line = formatStatusLine({
+    active: { preset: 'm', turns: 1, tokens: 1, hitRate: 1, cost: 0 },
+    agg: { tokens: 1, hitRate: 1, cost: 0 },
+    contextPercent: null,
+    compactThreshold: 0.75,
+  })
+  assert.ok(line.includes('压缩阈值 75%'), line)
 })
 
 // ── cost estimation (price table × token buckets) ──

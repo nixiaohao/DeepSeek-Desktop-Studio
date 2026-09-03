@@ -43,6 +43,10 @@ export interface StatsSessionRow {
   /** Present ⇒ subagent (from session.list's parentSessionId). */
   parentSessionId?: string
   running: boolean
+  /** Session recency stamp (session.list); picks the "current" session. */
+  updatedAt?: number
+  /** Preset name (session.list); the status line's model segment. */
+  agentPreset?: string
   stats?: SessionStatsView
   usage?: TokenUsageView
 }
@@ -152,6 +156,95 @@ export function formatStatsSummary(s: AggregatedStats | null | undefined): strin
   return parts.join(' · ')
 }
 
+// ── full status line (the Reasonix-style bottom bar) ──
+//
+// The status bar shows ONE line of labelled segments:
+//   model | 本次命中 | 平均命中 | 会话 tokens | 本次 tokens | 本次费用 |
+//   当前会话 N 轮 | 上下文 N% | 压缩阈值 N% | 会话费用
+// "本次" = the most recently updated MAIN session; "会话/平均" = the fold over
+// every main session. Missing values render as "-", never as 0 — a zero would
+// claim the agent ran for free, a dash says "nothing seen yet".
+
+/** The current (most recently updated main) session's view. */
+export interface StatusActiveSession {
+  /** Preset name, shown as the leading model segment. */
+  preset?: string
+  /** Closed turns of that session. */
+  turns: number
+  /** Total tokens (four buckets summed) of that session. */
+  tokens: number
+  /** Cache hit rate 0..100, or null when nothing was seen. */
+  hitRate: number | null
+  /** Local cost estimate in 元, or null when no price matched. */
+  cost: number | null
+}
+
+/** The all-main-sessions fold the "会话/平均" segments show. */
+export interface StatusAggregate {
+  tokens: number
+  hitRate: number | null
+  cost: number | null
+}
+
+/** Everything the one-line formatter needs. All fields untrusted. */
+export interface StatusBarView {
+  active: StatusActiveSession | null
+  agg: StatusAggregate
+  /** Context occupancy of the binding session, 0..100, or null. */
+  contextPercent: number | null
+  /**
+   * Compaction threshold as a fraction (0.8 = 80%). The wire does not carry
+   * it: dsh's compaction-basic resolves `thresholdRatio` from the profile
+   * with DEFAULT_THRESHOLD_RATIO = 0.8, and no session projection exposes
+   * the resolved value, so the shell shows the documented default.
+   */
+  compactThreshold: number
+}
+
+/** True when a status line has nothing at all to say (keeps the bar hidden). */
+function statusIsEmpty(v: StatusBarView): boolean {
+  const noActive = !v.active || (v.active.turns === 0 && v.active.tokens === 0 && !v.active.preset)
+  return noActive && v.agg.tokens === 0 && v.contextPercent === null && v.agg.cost === null
+}
+
+/** One labelled segment; missing values render as the dash, never 0. */
+function seg(label: string, value: string | null): string {
+  return `${label} ${value ?? '-'}`
+}
+
+function fmtYuan(cost: number | null): string | null {
+  if (cost === null || cost === undefined) return null
+  const yuan = cost >= 100 ? Math.round(cost) : Math.round(cost * 1000) / 1000
+  return `¥${yuan}`
+}
+
+/**
+ * Format the full status line, or '' when nothing has been seen yet.
+ *
+ * Segment order mirrors the reference design (Reasonix bottom bar); the
+ * 估算 marker is carried by the 费用 segments' tooltip in the page, the way
+ * the previous cost segment did it.
+ */
+export function formatStatusLine(v: StatusBarView | null | undefined): string {
+  if (!v || typeof v !== 'object' || !v.agg || typeof v.agg !== 'object') return ''
+  if (statusIsEmpty(v)) return ''
+
+  const parts: string[] = []
+  const active = v.active && typeof v.active === 'object' ? v.active : null
+  if (active?.preset) parts.push(active.preset)
+  parts.push(seg('本次命中', active && active.hitRate !== null ? `${active.hitRate}%` : null))
+  parts.push(seg('平均命中', v.agg.hitRate !== null ? `${v.agg.hitRate}%` : null))
+  parts.push(seg('会话 tokens', v.agg.tokens > 0 ? formatTokens(v.agg.tokens) : null))
+  parts.push(seg('本次 tokens', active && active.tokens > 0 ? formatTokens(active.tokens) : null))
+  parts.push(seg('本次费用', active ? fmtYuan(active.cost) : null))
+  parts.push(seg('当前会话', active ? `${active.turns} 轮` : null))
+  parts.push(seg('上下文', v.contextPercent !== null ? `${v.contextPercent}%` : null))
+  const pct = Number.isFinite(v.compactThreshold) ? Math.round(v.compactThreshold * 100) : 80
+  parts.push(seg('压缩阈值', `${pct}%`))
+  parts.push(seg('会话费用', fmtYuan(v.agg.cost)))
+  return parts.join(' | ')
+}
+
 // ── session overview (the panel's 会话概览 tab) ──
 //
 // Same defensive posture as aggregateStats: every field is read through num()
@@ -161,7 +254,12 @@ export function formatStatsSummary(s: AggregatedStats | null | undefined): strin
 export interface ContextPressureView {
   contextWindow?: number
   pressureTokens?: number
-  surfaceTokens?: number
+  /**
+   * token-meter's estimate of what the NEXT request's prompt would cost.
+   * (An earlier draft read a `surfaceTokens` field here — no such field
+   * exists on the wire; see token-meter/src/projection.ts.)
+   */
+  projectedTokens?: number
 }
 
 /** Context-composition projection (token-meter's contextBreakdown wire view). */
@@ -178,12 +276,16 @@ export interface OverviewSessionRow {
   running?: boolean
   /** Preset name — the price table's match key for the cost estimate. */
   agentPreset?: string
+  /** Session-recency stamp; the overview shows the newest main session's numbers. */
+  updatedAt?: number
   usage?: {
     uncachedInputTokens?: number
     outputTokens?: number
     cacheReadTokens?: number
     cacheWriteTokens?: number
   }
+  /** sessionStats projection (turns/steps/llmMs/...), when it arrived. */
+  stats?: SessionStatsView
   contextPressure?: ContextPressureView
   contextBreakdown?: ContextBreakdownView
 }
@@ -204,19 +306,37 @@ export interface AggregatedOverview {
   }
   /** Composition of the live context, or null when no breakdown arrived. */
   breakdown: { system: number; tools: number; messages: number } | null
+  /** Summed model wall time over message-assembling steps, ms. */
+  llmMs: number
+  /** Closed steps across all sessions (the "请求数" figure). */
+  steps: number
+  /** Closed turns of the NEWEST main session (the "当前会话 N 轮" figure). */
+  activeTurns: number | null
+  /** The newest main session's preset (model name the bar/overview shows). */
+  activePreset: string | null
+  activeTokens: number
+  activeHitRate: number | null
 }
 
 /**
  * Aggregate the overview across sessions. Context occupancy takes the MAX
  * per-session pressure (the session closest to its limit is the one the user
  * must act on), tokens SUM (the bill is the sum), and the breakdown sums the
- * system/tools/messages composition.
+ * system/tools/messages composition. llmMs/steps fold over every session;
+ * activeTurns/activeTokens/activeHitRate come from the single most recently
+ * updated MAIN session (the "current" conversation in the UI sense).
  */
 export function aggregateOverview(rows: readonly OverviewSessionRow[]): AggregatedOverview {
   const tokens = { uncachedInput: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   let breakdown: { system: number; tools: number; messages: number } | null = null
   let contextUsed = 0
   let contextWindow: number | null = null
+  let llmMs = 0
+  let steps = 0
+
+  // The "current session" pick: newest updatedAt among MAIN sessions.
+  let activeRow: OverviewSessionRow | null = null
+  let activeStamp = -1
 
   for (const row of rows as readonly (OverviewSessionRow | null | undefined)[]) {
     if (!row || typeof row !== 'object') continue
@@ -229,6 +349,21 @@ export function aggregateOverview(rows: readonly OverviewSessionRow[]): Aggregat
       tokens.cacheWrite += num(u.cacheWriteTokens)
     }
 
+    const st = row.stats && typeof row.stats === 'object' ? row.stats : null
+    if (st) {
+      llmMs += num(st.llmMs)
+      steps += num(st.steps)
+    }
+
+    const isMain = !(typeof row.parentSessionId === 'string' && row.parentSessionId.length > 0)
+    if (isMain) {
+      const stamp = num(row.updatedAt)
+      if (stamp > activeStamp) {
+        activeStamp = stamp
+        activeRow = row
+      }
+    }
+
     const cp = row.contextPressure
     if (cp && typeof cp === 'object') {
       const window = num(cp.contextWindow)
@@ -237,7 +372,7 @@ export function aggregateOverview(rows: readonly OverviewSessionRow[]): Aggregat
         // models with different limits.
         contextWindow = window
       }
-      const used = num(cp.pressureTokens) || num(cp.surfaceTokens)
+      const used = num(cp.pressureTokens) || num(cp.projectedTokens)
       if (used > contextUsed) contextUsed = used
     }
 
@@ -257,6 +392,29 @@ export function aggregateOverview(rows: readonly OverviewSessionRow[]): Aggregat
   const hitRate = inputTotal > 0
     ? Math.round((tokens.cacheRead / inputTotal) * 1000) / 10
     : null
+
+  // Current-session figures. Its usage may be absent while its stats exist —
+  // every field degrades independently.
+  let activeTurns: number | null = null
+  let activePreset: string | null = null
+  let activeTokens = 0
+  let activeHitRate: number | null = null
+  if (activeRow) {
+    const st = activeRow.stats && typeof activeRow.stats === 'object' ? activeRow.stats : null
+    if (st && num(st.turns) > 0) activeTurns = num(st.turns)
+    if (typeof activeRow.agentPreset === 'string' && activeRow.agentPreset) {
+      activePreset = activeRow.agentPreset
+    }
+    const au = activeRow.usage
+    if (au && typeof au === 'object') {
+      activeTokens =
+        num(au.uncachedInputTokens) + num(au.cacheReadTokens) +
+        num(au.cacheWriteTokens) + num(au.outputTokens)
+      const aIn = num(au.cacheReadTokens) + num(au.uncachedInputTokens)
+      if (aIn > 0) activeHitRate = Math.round((num(au.cacheReadTokens) / aIn) * 1000) / 10
+    }
+  }
+
   const contextPercent = contextWindow !== null && contextWindow > 0
     ? Math.round((contextUsed / contextWindow) * 1000) / 10
     : null
@@ -268,6 +426,12 @@ export function aggregateOverview(rows: readonly OverviewSessionRow[]): Aggregat
     hitRate,
     tokens,
     breakdown,
+    llmMs,
+    steps,
+    activeTurns,
+    activePreset,
+    activeTokens,
+    activeHitRate,
   }
 }
 

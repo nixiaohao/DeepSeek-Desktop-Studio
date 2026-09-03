@@ -210,6 +210,11 @@ function createMainWindow(url: string): BrowserWindow {
     splashWindow?.close()
     splashWindow = null
     win.show()
+    // The first layout/visibility pass ran against a HIDDEN window. Re-run it
+    // now that the window is real: with only the status bar enabled the bar
+    // could come up missing after a restart (reported 2026-09-03), and a
+    // second, visible pass is the belt-and-braces fix that costs nothing.
+    windowManager?.applyVisibilityAndLayout()
   })
 
   // SAFETY NET: `did-finish-load` does NOT fire if the page errors during load
