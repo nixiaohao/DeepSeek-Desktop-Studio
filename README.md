@@ -17,11 +17,15 @@ the agent.
 
 - **File/git sidebar** (left) — directory tree with change badges, one-click
   diff with lightweight syntax highlighting, and the dsh session directories
-  as one-click workspace suggestions.
+  as one-click workspace suggestions. Its **Sessions** tab lists dsh's
+  sessions grouped by project: click one to re-root the tree at its
+  directory, double-click to narrow the log bar to that conversation's agent
+  activity (subagents included).
 - **Monitoring panel** (right) — change review with per-tool approval and
   batch allow/reject, backend health readout, and the backend's raw output.
 - **Bottom log bar** — shell, backend and agent activity in one place, with
-  per-source filters and drag-to-resize.
+  per-source filters, a session filter set from the sidebar's Sessions tab,
+  and drag-to-resize.
 - **Status bar** — dsh version/port/channel, plus live aggregated agent
   stats (LLM time, tool time, tokens up/down, subagent count) covering main
   and subagents alike.
@@ -172,9 +176,9 @@ DeepSeek Desktop Studio 把 `dsh` 命令行工作流封装成原生桌面应用�
 
 #### 工作台布局
 
-- **文件/git 侧栏**（左）—— 带变更徽标的目录树、一键 diff（轻量语法高亮）、dsh 会话目录一键切换工作区。
+- **文件/git 侧栏**（左）—— 带变更徽标的目录树、一键 diff（轻量语法高亮）、dsh 会话目录一键切换工作区。**会话**页按项目分组列出 dsh 会话：点击定位到该会话目录，双击把日志面板收窄到该会话的 agent 活动（含子 agent）。
 - **监控面板**（右）—— 变更审查（按工具审批、批量允许/拒绝）、后端健康读数、后端原始输出。
-- **底部日志面板** —— shell、后端、agent 活动三源合一，按来源过滤，顶部拖拽调高。
+- **底部日志面板** —— shell、后端、agent 活动三源合一，按来源过滤，也可按会话过滤（由侧栏会话页双击设定），顶部拖拽调高。
 - **状态栏** —— dsh 版本/端口/通道，加上实时聚合的 agent 统计（LLM 耗时、工具耗时、↑↓ token、子 agent 数），主 agent 与子 agent 一并覆盖。
 - 每个面板都可显隐、拖拽、持久化；小窗口下优雅降级（面板塌缩，而不是把 dsh 页面挤到不可用）。
 
@@ -272,6 +276,33 @@ Linux 需要 `dpkg`/`fakeroot`，请在 Linux 容器（`node:22-bookworm`）内�
 本项目构建于 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（MIT © 2026 DeepSeek）之上。完整文本见 `LICENSE`。
 
 ## Changelog / 更新日志
+
+### Unreleased (after v0.2.0)
+
+**English**
+- Added: session-scoped log filter — double-click a session in the sidebar's
+  Sessions tab and the bottom log bar follows that conversation (subagents
+  included); the filter shows as a chip in the log bar and clears with one
+  click. The log bar is revealed automatically if it was hidden.
+- Added: the sidebar's Sessions tab itself — dsh sessions grouped by project,
+  newest first, with their upstream titles; a click re-roots the file tree.
+- Added: the monitoring panel's 概览 tab (context occupancy, token
+  composition, run metrics) and three layout presets (专注 / 经典 / 极简).
+- Added: the status bar's cost segment — cache hit rate plus an estimated
+  cost, priced from a user-editable table at `~/.dsh/model-prices.json`
+  (built-in DeepSeek pricing; unmatched presets are simply not priced).
+- Fixed: the log bar's path menu called a toast helper that did not exist, so
+  a failed "open in editor" looked exactly like a successful one.
+- Fixed: clicking a session whose directory was already the sidebar's root
+  did nothing at all, with no feedback.
+
+**中文**
+- 新增：按会话过滤日志——在侧栏「会话」页双击会话，底部日志面板只跟随该会话（含子 agent）；过滤以 chip 形式显示在日志面板上，一键取消。日志面板原本隐藏时会自动显示。
+- 新增：侧栏「会话」页本身——按项目分组、最新在前、带上游标题；点击可把文件树定位到该会话目录。
+- 新增：监控面板「概览」页（上下文占用、token 构成、运行指标）与三档布局预设（专注/经典/极简）。
+- 新增：状态栏费用段——命中率 + 估算费用，价格来自 `~/.dsh/model-prices.json`（用户可编辑，内置 DeepSeek 官方价；未匹配的 preset 不计费）。
+- 修复：日志面板路径菜单调用了一个并不存在的提示函数，导致「用编辑器打开」失败时看起来和成功一样。
+- 修复：点击目录已等于侧栏根目录的会话时毫无反应且无任何提示。
 
 ### v0.2.0 — 2026-09-02
 
