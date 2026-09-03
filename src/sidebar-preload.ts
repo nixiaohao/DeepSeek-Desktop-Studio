@@ -80,6 +80,14 @@ contextBridge.exposeInMainWorld('dshSidebar', {
     title?: string
   }[]> => ipcRenderer.invoke('sidebar:sessions'),
 
+  /**
+   * Narrow the bottom log bar to one session's agent activity (double-click
+   * in the navigator). Returns the title the filter is shown under, or
+   * `{ok:false, error}` when the session is already gone.
+   */
+  focusSession: (sessionId: string): Promise<{ ok: boolean; title?: string; error?: string }> =>
+    ipcRenderer.invoke('sidebar:focus-session', sessionId),
+
   /** Native directory picker. Returns '' when cancelled. */
   pickDir: (): Promise<string> => ipcRenderer.invoke('sidebar:pick-dir'),
 

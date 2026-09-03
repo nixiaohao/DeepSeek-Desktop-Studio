@@ -480,6 +480,7 @@ const EXPECTED = [
   ['log-model.js', 'entryFromBackend'],
   ['log-model.js', 'entryFromAgent'],
   ['log-model.js', 'buildView'],
+  ['log-model.js', 'matchesSession'],
   ['log-model.js', 'LOG_SOURCES'],
   ['log-model.js', 'LOG_SOURCE_LABELS'],
   ['stats-model.js', 'aggregateStats'],
@@ -563,7 +564,8 @@ assert(
 // two can never drift apart.
 console.log('modules: registerIpc channel coverage')
 
-const { registerIpc } = require(path.join(LIB, 'ipc-registry.js'))
+const { registerIpc, pushLogbar, setWindowManagerAccessor } = require(path.join(LIB, 'ipc-registry.js'))
+const { entryFromAgent, entryFromBackend } = require(path.join(LIB, 'log-model.js'))
 
 /** Records what registerIpc did to the mux stream, so the wiring is asserted. */
 const streamCalls = { onChange: 'never-called', responded: [] }
@@ -891,6 +893,159 @@ async function checkDiagnosticsIpc() {
 }
 
 /**
+ * The session navigator's log filter (double-click a session → the log bar
+ * follows it), driven through the captured handlers.
+ *
+ * This is the one rule that must NOT live in a page: which lines belong to a
+ * session decides whether the panel looks broken, and the page cannot be the
+ * thing deciding it — it only ever holds the text. So it is asserted here,
+ * through the same entries the app would push.
+ */
+async function checkSessionLogFilter() {
+  console.log('modules: session-scoped log filter')
+
+  const sessions = [
+    { sessionId: 'main-1', cwd: 'D:/proj', running: true, updatedAt: 2 },
+    { sessionId: 'sub-1', parentSessionId: 'main-1', running: true, updatedAt: 2 },
+    { sessionId: 'main-2', cwd: 'D:/other', running: false, updatedAt: 1 },
+  ]
+  const activity = [
+    { sessionId: 'main-1', kind: 'tool/call', name: 'Bash', ts: 10 },
+    { sessionId: 'sub-1', kind: 'tool/call', name: 'Read', ts: 11 },
+    { sessionId: 'main-2', kind: 'tool/call', name: 'Write', ts: 12 },
+  ]
+  const titles = [
+    { sessionId: 'main-1', key: 'title', value: '重构侧栏', seq: 1 },
+    { sessionId: 'sub-1', key: 'title', value: '子任务', seq: 1 },
+  ]
+  const filterStream = {
+    setOnChange: () => {},
+    panelSnapshot: () => ({ changes: [], approvals: [], sessions, dropped: 0, connected: true }),
+    approvals: () => [],
+    sessions: () => sessions,
+    snapshot: () => ({ changes: [], approvals: [], sessions, activity, dropped: 0 }),
+    store: { projectionEntries: () => titles },
+  }
+
+  // A recordable log bar: `send` is an own property on FakeWebContents, so
+  // this instance alone captures what the main process pushes to it.
+  const sent = []
+  const logBarView = new FakeView()
+  logBarView.webContents.send = (ch, payload) => {
+    sent.push({ ch, payload })
+  }
+  let logbarVisible = false
+  const fakeWm = {
+    logBar: logBarView,
+    get panelPrefs() {
+      return { logbarVisible }
+    },
+    setLogbarVisible: (v) => {
+      logbarVisible = v
+    },
+  }
+
+  const teardown = registerIpc({
+    getWindowManager: () => fakeWm,
+    getHealthMonitor: () => null,
+    getStream: () => filterStream,
+    getAppVersion: () => '0.0.0-smoke',
+    restartBackend: async () => ({ ok: true }),
+    getStatusInfo: () => ({ version: 'x', port: null, channel: 'next' }),
+    quitApp: () => {},
+  })
+
+  // pushLogbar resolves the log bar through the late-bound accessor, not
+  // through IpcDeps, so this is what makes the pushes below observable.
+  setWindowManagerAccessor(() => fakeWm)
+
+  try {
+    const focus = ipcChannels.handlers.get('sidebar:focus-session')
+    const snapshot = ipcChannels.handlers.get('logs:snapshot')
+    const clear = ipcChannels.handlers.get('logs:clear-session-filter')
+    assert(typeof focus === 'function', 'sidebar:focus-session has a handler we can drive', 'no handler captured')
+    assert(typeof snapshot === 'function', 'logs:snapshot has a handler we can drive', 'no handler captured')
+    assert(typeof clear === 'function', 'logs:clear-session-filter has a handler we can drive', 'no handler captured')
+
+    // ── input validation ──
+    assert((await focus(null, '')).ok === false, 'an empty session id is refused', 'a filter on nothing would blank the log bar')
+    assert((await focus(null, 42)).ok === false, 'a non-string session id is refused')
+    assert((await focus(null, 'gone')).ok === false, 'an unknown session is refused', 'a stale row must not filter to an empty panel')
+
+    // ── before any filter, nothing is narrowed ──
+    const before = await snapshot(null)
+    assert(before.entries.length === 3, 'an unfiltered snapshot carries every session', `got ${before.entries.length}`)
+    assert(before.filter === null, 'and reports no filter', JSON.stringify(before.filter))
+
+    // ── the double-click ──
+    const res = await focus(null, 'main-1')
+    assert(res.ok === true, 'focusing a live session succeeds', JSON.stringify(res))
+    assert(res.title === '重构侧栏', 'and reports the title the navigator shows', JSON.stringify(res))
+    assert(logbarVisible === true, 'the log bar is revealed when it was hidden', 'a filter nobody can see looks like nothing happened')
+    assert(
+      sent.some((s) => s.ch === 'logs:session-filter' && s.payload && s.payload.sessionId === 'main-1'),
+      'the filter change is pushed to the log bar',
+      'the page would keep showing the unfiltered buffer',
+    )
+
+    // ── the filtered snapshot: this session AND its subagent ──
+    const after = await snapshot(null)
+    assert(
+      after.entries.filter((e) => e.text.includes('Bash')).length === 1,
+      'the session keeps its own activity',
+      JSON.stringify(after.entries.map((e) => e.text)),
+    )
+    assert(
+      after.entries.filter((e) => e.text.includes('Read')).length === 1,
+      'a subagent counts as its parent session',
+      'the subagent does the work on the session the user clicked',
+    )
+    assert(
+      after.entries.filter((e) => e.text.includes('Write')).length === 0,
+      "another session's activity is dropped",
+      JSON.stringify(after.entries.map((e) => e.text)),
+    )
+    assert(after.filter && after.filter.title === '重构侧栏', 'the snapshot reports the active filter')
+
+    // ── live lines are filtered too, in the main process ──
+    const linesBefore = sent.filter((s) => s.ch === 'logs:lines').length
+    pushLogbar(entryFromAgent({ ts: 20, text: '[主] 调用 Edit', sessionId: 'main-1', rootSessionId: 'main-1' }))
+    pushLogbar(entryFromAgent({ ts: 21, text: '[主] 调用 Grep', sessionId: 'main-2', rootSessionId: 'main-2' }))
+    pushLogbar(entryFromBackend({ ts: 22, stream: 'out', text: 'backend chatter' }))
+    const pushed = sent.filter((s) => s.ch === 'logs:lines')
+    assert(
+      pushed.length - linesBefore === 1,
+      'only the focused session reaches the log bar live',
+      `${pushed.length - linesBefore} of 3 lines were pushed`,
+    )
+    assert(
+      pushed[pushed.length - 1].payload[0].text.includes('Edit'),
+      'and it is the right line',
+      JSON.stringify(pushed[pushed.length - 1].payload[0]),
+    )
+
+    // ── clearing ──
+    assert((await clear(null)).ok === true, 'clearing the filter succeeds')
+    const cleared = await snapshot(null)
+    assert(cleared.entries.length === 3, 'the snapshot is whole again', `got ${cleared.entries.length}`)
+    assert(cleared.filter === null, 'and reports no filter')
+
+    const linesAfterClear = sent.filter((s) => s.ch === 'logs:lines').length
+    pushLogbar(entryFromBackend({ ts: 23, stream: 'out', text: 'backend chatter again' }))
+    assert(
+      sent.filter((s) => s.ch === 'logs:lines').length === linesAfterClear + 1,
+      'backend lines come back once the filter is gone',
+      'a cleared filter must not keep swallowing non-agent lines',
+    )
+  } finally {
+    teardown()
+    // Leave no trace for the checks that follow: a captured window manager
+    // would let later pushes find a view that is about to be discarded.
+    setWindowManagerAccessor(() => null)
+  }
+}
+
+/**
  * Static guard for the three-column layout policy.
  *
  * Two user reports are pinned down here:
@@ -1092,6 +1247,11 @@ checkBatchGuard()
   .catch((err) => {
     fail += 1
     console.error(`  FAIL diagnostics ipc threw: ${err && err.message}`)
+  })
+  .then(checkSessionLogFilter)
+  .catch((err) => {
+    fail += 1
+    console.error(`  FAIL session log filter threw: ${err && err.message}`)
   })
   .then(checkLayoutPolicy)
   .catch((err) => {

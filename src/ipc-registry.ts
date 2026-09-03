@@ -24,7 +24,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { subscribeBackend, getBackendLines, getLogDir, getRecentLines, log, subscribeLog } from './logging.js'
 import type { BackendLine } from './logging.js'
-import { buildView, entryFromBackend, entryFromAgent, parseShellLine, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
+import { buildView, entryFromBackend, entryFromAgent, parseShellLine, matchesSession, LOG_SOURCES, LOG_SOURCE_LABELS } from './log-model.js'
 import type { LogEntry } from './log-model.js'
 import { aggregateStats, aggregateOverview, formatStatsSummary, formatCostSummary, estimateCost, pickPrice, parsePriceOverrides, BUILTIN_PRICES, type StatsSessionRow, type OverviewSessionRow, type CostSummary } from './stats-model.js'
 import { loadPriceOverridesText } from './preferences.js'
@@ -64,6 +64,7 @@ import type { HealthMonitor } from './health-monitor.js'
 import type { WindowManager } from './window-manager.js'
 import type { SidebarService } from './sidebar-service.js'
 import type { DshStream, ApprovalOutcome } from './dsh-stream.js'
+import type { ActivityEntry, SessionInfo } from './event-store.js'
 
 export interface IpcDeps {
   getWindowManager: () => WindowManager | null
@@ -183,18 +184,56 @@ export function pushSidebarUpdate(): void {
 }
 
 /**
+ * The log bar's session filter: set by a double-click in the sidebar's session
+ * navigator, cleared from the filter chip inside the log bar itself.
+ *
+ * MODULE-LEVEL on purpose, even though it is display state: `pushLogbar` is
+ * exported and therefore runs outside registerIpc's closure, and the filter
+ * has to hold for every live line, not just for snapshots. It is reset at the
+ * top of registerIpc so a relaunch never inherits a session id from the
+ * previous backend — a stale id would show an empty log bar, which reads
+ * exactly like "the app is broken".
+ *
+ * `title` is captured when the filter is set (the session may well be gone by
+ * the time the user clears it) and is what the chip shows.
+ */
+let logSessionFilter: { sessionId: string; title: string } | null = null
+
+/**
  * Push one structured log entry to the bottom log panel.
  *
  * Mirrors pushSidebarUpdate(): late-bound manager lookup (the logbar outlives
  * individual windows and the feed runs before/after window rebuilds), and a
  * try/catch because the view may be torn down mid-send. The page batches its
  * own rendering through requestAnimationFrame, so per-line sends are fine.
+ *
+ * Filtering happens HERE rather than in the page so the rule lives in exactly
+ * one place (log-model's matchesSession, unit-tested): the page would have to
+ * duplicate it, and a duplicate that drifts shows lines from the wrong session
+ * with nothing to flag it.
  */
 export function pushLogbar(entry: LogEntry): void {
+  if (logSessionFilter && !matchesSession(entry, logSessionFilter.sessionId)) return
   const view = getWindowManagerCached?.()?.logBar ?? null
   if (!view) return
   try {
     view.webContents.send('logs:lines', [entry])
+  } catch { /* view destroyed mid-send */ }
+}
+
+/**
+ * Tell the log bar its session filter changed, so it can drop its buffer and
+ * re-read the (now filtered) snapshot.
+ *
+ * Payload-only push, like `sidebar:update`: the page already knows how to
+ * fetch, and a filter object small enough to send would still be a second
+ * copy of the truth to keep in sync.
+ */
+function pushSessionFilter(): void {
+  const view = getWindowManagerCached?.()?.logBar ?? null
+  if (!view) return
+  try {
+    view.webContents.send('logs:session-filter', logSessionFilter)
   } catch { /* view destroyed mid-send */ }
 }
 
@@ -218,6 +257,11 @@ function safeSidebarPath(sidebar: SidebarService | null, path: unknown): string 
  */
 export function registerIpc(deps: IpcDeps): () => void {
   const { getWindowManager, getHealthMonitor } = deps
+
+  // A fresh registration means a fresh backend — see the note on the
+  // declaration: keeping a session id from a previous process would filter
+  // the log bar down to a conversation that no longer exists.
+  logSessionFilter = null
 
   // ── Legacy channels (moved verbatim from main.ts) ──
 
@@ -452,6 +496,23 @@ export function registerIpc(deps: IpcDeps): () => void {
 
   // ── Sidebar: file tree + git ──
 
+  /**
+   * Session ids → the title the session navigator shows, from the 'title'
+   * projection. Shared by the navigator itself and by the log bar's filter so
+   * the chip names the same session, in the same words, the user just clicked.
+   */
+  const sessionTitles = (): Map<string, string> => {
+    const store = deps.getStream?.()?.store
+    if (!store) return new Map()
+    const titles = new Map<string, string>()
+    for (const p of store.projectionEntries()) {
+      if (p.key === 'title' && typeof p.value === 'string' && p.value.length > 0) {
+        titles.set(p.sessionId, p.value)
+      }
+    }
+    return titles
+  }
+
   ipcMain.handle('sidebar:snapshot', () => deps.getSidebar?.()?.snapshot() ?? EMPTY_SIDEBAR)
 
   /**
@@ -464,12 +525,7 @@ export function registerIpc(deps: IpcDeps): () => void {
     const store = deps.getStream?.()?.store
     if (!store) return []
     const snap = store.snapshot()
-    const titles = new Map<string, string>()
-    for (const p of store.projectionEntries()) {
-      if (p.key === 'title' && typeof p.value === 'string' && p.value.length > 0) {
-        titles.set(p.sessionId, p.value)
-      }
-    }
+    const titles = sessionTitles()
     return snap.sessions
       .filter((s) => !s.parentSessionId)
       .map((s) => ({
@@ -479,6 +535,33 @@ export function registerIpc(deps: IpcDeps): () => void {
         updatedAt: s.updatedAt,
         title: titles.get(s.sessionId),
       }))
+  })
+
+  /**
+   * Point the log bar at ONE session (double-click in the session navigator).
+   *
+   * The click next to it re-roots the file tree; this one narrows the log bar
+   * to that conversation's agent activity — the second half of phase 2, which
+   * the first pass left out.
+   *
+   * The log bar is shown if it was hidden: setting a filter nobody can see
+   * looks like nothing happened. `title` is resolved from the same projection
+   * the navigator renders, falling back to the raw id for an untitled session.
+   */
+  ipcMain.handle('sidebar:focus-session', (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      return { ok: false, error: '空会话 id' }
+    }
+    const sessions = deps.getStream?.()?.snapshot().sessions ?? []
+    if (!sessions.some((s) => s.sessionId === sessionId)) {
+      return { ok: false, error: '会话已不存在' }
+    }
+    const title = sessionTitles().get(sessionId) || sessionId
+    logSessionFilter = { sessionId, title }
+    pushSessionFilter()
+    const wm = getWindowManager()
+    if (wm && !wm.panelPrefs.logbarVisible) wm.setLogbarVisible(true)
+    return { ok: true, title }
   })
 
   ipcMain.handle('sidebar:set-root', async (_e, dir: unknown) => {
@@ -709,25 +792,40 @@ export function registerIpc(deps: IpcDeps): () => void {
    *
    * The 主/子 prefix is resolved HERE, at read time, from the session table in
    * the same snapshot — so an entry recorded before the 5s poll first
-   * classified its session still renders with the right role.
+   * classified its session still renders with the right role. The session ids
+   * come along for the same reason, and `rootSessionId` is walked up the
+   * parent chain so a session filter catches a subagent's work however deeply
+   * it is nested.
    */
-  const agentFeed = (): LogEntry[] => {
-    const snap = deps.getStream?.()?.snapshot()
-    const activity = snap?.activity ?? []
-    const roleOf = (sessionId: string): string => {
-      const row = snap?.sessions.find((s) => s.sessionId === sessionId)
-      return row?.parentSessionId ? '子' : '主'
+  const activityEntries = (list: readonly ActivityEntry[]): LogEntry[] => {
+    const sessions: readonly SessionInfo[] = deps.getStream?.()?.snapshot().sessions ?? []
+    const byId = new Map(sessions.map((s) => [s.sessionId, s] as const))
+    /**
+     * Bounded walk: a parent chain that somehow points at itself must not hang
+     * the feed. Eight levels is far past anything dsh creates (main → subagent)
+     * and keeps the loop obviously finite.
+     */
+    const rootOf = (sessionId: string): string => {
+      let cur = sessionId
+      for (let i = 0; i < 8; i++) {
+        const parent = byId.get(cur)?.parentSessionId
+        if (!parent) break
+        cur = parent
+      }
+      return cur
     }
-    return activity.map((a) =>
-      entryFromAgent({
+    return list.map((a) => {
+      const role = byId.get(a.sessionId)?.parentSessionId ? '子' : '主'
+      return entryFromAgent({
         ts: a.ts,
-        text:
-          a.kind === 'tool/call'
-            ? `[${roleOf(a.sessionId)}] 调用 ${a.name}`
-            : `[${roleOf(a.sessionId)}] 完成 ${a.name}`,
-      }),
-    )
+        text: a.kind === 'tool/call' ? `[${role}] 调用 ${a.name}` : `[${role}] 完成 ${a.name}`,
+        sessionId: a.sessionId,
+        rootSessionId: rootOf(a.sessionId),
+      })
+    })
   }
+
+  const agentFeed = (): LogEntry[] => activityEntries(deps.getStream?.()?.snapshot().activity ?? [])
 
   /**
    * Buffered history from all three feeds, merged/sorted/capped by
@@ -737,11 +835,38 @@ export function registerIpc(deps: IpcDeps): () => void {
    * on top, and re-invoking snapshot on every filter toggle would ship the
    * whole ring over IPC for nothing. `sources` rides along so the page builds
    * its chips from the same list the main process filters with.
+   *
+   * The session filter is applied on the main-process side (unlike the chips):
+   * the page has to DROP lines that no longer match, which only the filtered
+   * snapshot can tell it. The current filter rides along as `filter` so a page
+   * that loads while one is active shows the same chip it would have gotten
+   * from the push.
    */
   ipcMain.handle('logs:snapshot', () => ({
-    entries: buildView(getRecentLines(400), getBackendLines(400), agentFeed(), null, 400),
+    entries: buildView(
+      getRecentLines(400),
+      getBackendLines(400),
+      agentFeed(),
+      null,
+      400,
+      logSessionFilter?.sessionId ?? null,
+    ),
     sources: LOG_SOURCES.map((id) => ({ id, label: LOG_SOURCE_LABELS[id] })),
+    filter: logSessionFilter,
   }))
+
+  /**
+   * Clear the session filter (the chip's ✕).
+   *
+   * A `logs:*` channel rather than a `sidebar:*` one because the log bar owns
+   * clearing its own filter — and test/panel-api.contract.cjs rejects a
+   * preload reaching into another overlay's namespace.
+   */
+  ipcMain.handle('logs:clear-session-filter', () => {
+    logSessionFilter = null
+    pushSessionFilter()
+    return { ok: true }
+  })
 
   ipcMain.handle('logs:reveal-dir', async () => {
     const err = await shell.openPath(getLogDir())
@@ -1112,21 +1237,10 @@ export function registerIpc(deps: IpcDeps): () => void {
         : activity
     lastActivityCount = activity.length
 
-    const roleOf = (sessionId: string): string => {
-      const row = snap?.sessions.find((s) => s.sessionId === sessionId)
-      return row?.parentSessionId ? '子' : '主'
-    }
-    for (const a of fresh) {
-      pushLogbar(
-        entryFromAgent({
-          ts: a.ts,
-          text:
-            a.kind === 'tool/call'
-              ? `[${roleOf(a.sessionId)}] 调用 ${a.name}`
-              : `[${roleOf(a.sessionId)}] 完成 ${a.name}`,
-        }),
-      )
-    }
+    // Same shaping as the snapshot's agent feed (and now the same session
+    // ids): a live line and a replayed one must carry identical metadata, or
+    // a filter would keep one and drop the other.
+    for (const entry of activityEntries(fresh)) pushLogbar(entry)
   }
 
   /**

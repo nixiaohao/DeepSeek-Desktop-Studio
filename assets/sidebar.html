@@ -862,6 +862,9 @@
   var sessionListEl = document.getElementById('sessionList');
 
   function setView(v) {
+    // A single-click on a session row is still pending until its timer fires;
+    // leaving it would re-root the tree after the user moved on.
+    if (sessClickTimer) { clearTimeout(sessClickTimer); sessClickTimer = null; }
     sidebarView = v;
     for (var i = 0; i < viewTabsEl.children.length; i++) {
       viewTabsEl.children[i].classList.toggle('on', viewTabsEl.children[i].dataset.v === v);
@@ -880,6 +883,34 @@
     var t = e.target.closest ? e.target.closest('.vtab') : null;
     if (t) setView(t.dataset.v);
   });
+
+  // Pending single-click on a session row; cancelled by the double-click that
+  // follows it (see the row handlers in renderSessions).
+  var sessClickTimer = null;
+
+  /**
+   * Point the file tree at a session's directory.
+   *
+   * Every branch reports something. The old version returned silently when the
+   * directory was already the current root, which is indistinguishable from a
+   * sidebar that stopped working — the row simply refused to react.
+   */
+  function focusDir(sess) {
+    if (!sess.cwd) { toast('该会话没有目录信息', true); return; }
+    if (sess.cwd === lastSnap.root) {
+      setView('files');
+      toast('文件树已在该目录');
+      return;
+    }
+    api.setRoot(sess.cwd).then(function (res) {
+      if (res && res.ok) {
+        toast('已定位到 ' + shortName(sess.cwd));
+        setView('files');
+      } else {
+        report(res);
+      }
+    }).catch(function () { toast('切换失败', true); });
+  }
 
   function relTime(ts) {
     if (typeof ts !== 'number' || !ts) return '';
@@ -936,19 +967,39 @@
           row.appendChild(dot);
           row.appendChild(st);
           row.appendChild(tm);
-          // A click re-roots the file tree at the session's directory and
-          // flips back to 文件 — navigation, not session switching (which
-          // stays inside dsh's own UI by design).
+          row.title = '点击定位到该会话的目录，双击只看该会话的日志';
+
+          /**
+           * A click re-roots the file tree at the session's directory and
+           * flips back to 文件 — navigation, not session switching (which
+           * stays inside dsh's own UI by design).
+           *
+           * DELAYED, because a double-click fires two clicks first: without
+           * this the log filter below would also yank the column back to 文件,
+           * hiding the very list the user double-clicked. One pending timer is
+           * enough — two rows cannot be clicked at once.
+           */
           row.onclick = function () {
-            if (!sess.cwd || sess.cwd === lastSnap.root) return;
-            api.setRoot(sess.cwd).then(function (res) {
-              if (res && res.ok) {
-                toast('已定位到 ' + shortName(sess.cwd));
-                setView('files');
-              } else {
-                report(res);
-              }
-            }).catch(function () { toast('切换失败', true); });
+            if (sessClickTimer) clearTimeout(sessClickTimer);
+            sessClickTimer = setTimeout(function () {
+              sessClickTimer = null;
+              focusDir(sess);
+            }, 220);
+          };
+
+          /**
+           * Double-click narrows the bottom log bar to this conversation
+           * (main session + its subagents). The log bar is the only place
+           * that shows what an agent did, and it mixes every session
+           * together — this is the navigator's other half.
+           */
+          row.ondblclick = function () {
+            if (sessClickTimer) { clearTimeout(sessClickTimer); sessClickTimer = null; }
+            if (!api.focusSession) return;
+            api.focusSession(sess.sessionId).then(function (res) {
+              if (res && res.ok) toast('日志已只看：' + (res.title || '未命名会话'));
+              else report(res);
+            }).catch(function () { toast('过滤失败', true); });
           };
           sessionListEl.appendChild(row);
         })(rows[r]);

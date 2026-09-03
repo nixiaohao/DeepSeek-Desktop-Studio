@@ -68,6 +68,24 @@
     border-radius: 10px; padding: 1px 10px; cursor: pointer;
   }
   .chip.off { opacity: .38; text-decoration: line-through; }
+  /* Session filter: accent-tinted so it cannot be mistaken for a source chip,
+     and always shows the ✕ that clears it. */
+  .chip.session {
+    display: none; border-color: var(--accent); color: var(--accent);
+    max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chip.session.on { display: inline-block; }
+
+  /* Feedback for the path menu (copy/edit/reveal). Fixed above the rows so it
+     never shifts the log the user is reading. */
+  #toast {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px;
+    display: none; z-index: 60; max-width: 80%;
+    background: #22262f; border: 1px solid var(--accent); color: var(--fg);
+    border-radius: 4px; padding: 4px 12px; font-size: var(--fs-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .5);
+  }
+  #toast.err { border-color: var(--err); color: var(--err); }
 
   /* Form controls do NOT inherit font-family/size from body in Chromium, so
      every one of them restates the tokens. Omitting it leaves 13px labels next
@@ -125,6 +143,7 @@
   <header>
     <span class="title">日志</span>
     <span id="chips"></span>
+    <button id="chip-session" class="chip session" title="只看这个会话的 Agent 活动，点击取消"></button>
     <span class="spacer"></span>
     <label class="chk"><input type="checkbox" id="chk-autoscroll" checked />自动滚动</label>
     <button id="btn-clear" title="清空当前视图（不影响日志文件）">清空</button>
@@ -135,6 +154,7 @@
     %APPDATA%\deepseek-studio\logs\，可通过菜单「视图 → 打开日志文件夹」直达。
   </div>
   <div id="lines"><div class="empty">加载中…</div></div>
+  <div id="toast"></div>
   <div id="path-menu">
     <div class="path-text"></div>
     <button data-act="edit">用外部编辑器打开</button>
@@ -156,10 +176,26 @@
   var entries = [];    // everything received, oldest first
   var active = null;   // null = all sources; otherwise a Set of source ids
   var labels = {};     // source id -> Chinese label
+  var sessionFilter = null; // { sessionId, title } | null — set from the sidebar's navigator
 
   var linesEl = document.getElementById('lines');
   var chipsEl = document.getElementById('chips');
+  var sessionChipEl = document.getElementById('chip-session');
   var autoscroll = document.getElementById('chk-autoscroll');
+
+  // Path-menu feedback (copy / open in editor / reveal). Defined here because
+  // the three handlers below all report through it — without it they threw a
+  // ReferenceError inside a promise callback, so a failed "open in editor"
+  // looked exactly like a successful one.
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+  function toast(msg, isErr) {
+    toastEl.textContent = msg;
+    toastEl.className = isErr ? 'err' : '';
+    toastEl.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.style.display = 'none'; }, 3000);
+  }
 
   function fmtTime(ts) {
     var d = new Date(ts);
@@ -253,7 +289,11 @@
       if (!view.length) {
         var empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = entries.length ? '当前筛选下没有日志' : '暂无日志输出';
+        // A session filter that matches nothing is a different question from
+        // "no logs yet" — say which one it is.
+        empty.textContent = sessionFilter
+          ? '「' + sessionFilter.title + '」暂无 Agent 活动'
+          : (entries.length ? '当前筛选下没有日志' : '暂无日志输出');
         frag.appendChild(empty);
       } else {
         for (var i = 0; i < view.length; i++) frag.appendChild(rowFor(view[i]));
@@ -297,18 +337,64 @@
     }
   }
 
-  api.snapshot().then(function (snap) {
-    if (snap && snap.sources) buildChips(snap.sources);
-    absorb(snap ? snap.entries : []);
-  }).catch(function () {
-    linesEl.textContent = '';
-    var empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = '无法读取日志快照';
-    linesEl.appendChild(empty);
-  });
+  /**
+   * Draw the session chip from the current filter.
+   *
+   * The ✕ is part of the label rather than a separate button: the chip is the
+   * only control that appears/disappears in this header, and a two-element
+   * version would need its own layout rules to keep the row from jumping.
+   */
+  function renderSessionChip() {
+    if (!sessionFilter) {
+      sessionChipEl.className = 'chip session';
+      sessionChipEl.textContent = '';
+      return;
+    }
+    sessionChipEl.className = 'chip session on';
+    sessionChipEl.textContent = '仅看：' + sessionFilter.title + ' ✕';
+    sessionChipEl.title = '只看这个会话的 Agent 活动，点击取消';
+  }
+
+  /**
+   * Replace the buffer with a fresh, already-filtered snapshot.
+   *
+   * The filter is applied in the MAIN process, so the lines this page already
+   * holds are the wrong ones the moment it changes — they cannot be filtered
+   * in place because the entries carry nothing but their text. Entries are
+   * cleared only once the snapshot is in hand, so a filter change can never
+   * leave the panel empty in between.
+   */
+  function reload() {
+    api.snapshot().then(function (snap) {
+      if (snap && snap.sources) buildChips(snap.sources);
+      if (snap && snap.filter !== undefined) sessionFilter = snap.filter;
+      renderSessionChip();
+      entries.length = 0;
+      absorb(snap ? snap.entries : []);
+    }).catch(function () {
+      linesEl.textContent = '';
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = '无法读取日志快照';
+      linesEl.appendChild(empty);
+    });
+  }
+
+  reload();
 
   api.onLines(absorb);
+
+  // The filter can change from either side: the sidebar sets it, the chip
+  // clears it. Both come back here as one push, and the page reacts the same
+  // way to both — re-read, redraw, done.
+  if (api.onSessionFilter) {
+    api.onSessionFilter(reload);
+  }
+
+  sessionChipEl.onclick = function () {
+    if (!api.clearSessionFilter) return;
+    api.clearSessionFilter();
+  };
 
   document.getElementById('btn-dir').onclick = function () {
     api.revealLogDir();

@@ -27,7 +27,7 @@
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
-/** Remove a listener previously added by `onLines`. */
+/** Remove a listener previously added by one of the `on*` helpers. */
 function off(channel: string, cb: (...args: unknown[]) => void): void {
   ipcRenderer.removeListener(channel, cb as never)
 }
@@ -39,9 +39,28 @@ contextBridge.exposeInMainWorld('dshLogs', {
   },
   offLines: (cb: (...args: unknown[]) => void): void => off('logs:lines', cb),
 
+  /**
+   * Fires when the session filter changed — set by a double-click in the
+   * sidebar's session navigator, cleared by the chip's ✕. `null` means "show
+   * everything". Carries the filter itself ({sessionId, title}) because the
+   * page has to redraw the chip and re-read the snapshot either way, and a
+   * payload-less bump would leave it guessing which session it is now on.
+   */
+  onSessionFilter: (cb: (filter: { sessionId: string; title: string } | null) => void): void => {
+    ipcRenderer.on('logs:session-filter', (_e: IpcRendererEvent, filter) => cb(filter ?? null))
+  },
+  offSessionFilter: (cb: (...args: unknown[]) => void): void => off('logs:session-filter', cb),
+
+  /** Drop the session filter (the chip's ✕) and go back to every source. */
+  clearSessionFilter: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('logs:clear-session-filter'),
+
   /** Buffered history from both feeds, merged/sorted/capped by the main process. */
-  snapshot: (): Promise<{ entries: unknown[]; sources: { id: string; label: string }[] }> =>
-    ipcRenderer.invoke('logs:snapshot'),
+  snapshot: (): Promise<{
+    entries: unknown[]
+    sources: { id: string; label: string }[]
+    filter?: { sessionId: string; title: string } | null
+  }> => ipcRenderer.invoke('logs:snapshot'),
 
   /** Reveal the log directory in the OS file manager. */
   revealLogDir: (): Promise<{ ok: boolean; error?: string }> =>
