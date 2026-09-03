@@ -277,34 +277,7 @@ Linux 需要 `dpkg`/`fakeroot`，请在 Linux 容器（`node:22-bookworm`）内�
 
 ## Changelog / 更新日志
 
-### Unreleased (after v0.2.0)
-
-**English**
-- Added: session-scoped log filter — double-click a session in the sidebar's
-  Sessions tab and the bottom log bar follows that conversation (subagents
-  included); the filter shows as a chip in the log bar and clears with one
-  click. The log bar is revealed automatically if it was hidden.
-- Added: the sidebar's Sessions tab itself — dsh sessions grouped by project,
-  newest first, with their upstream titles; a click re-roots the file tree.
-- Added: the monitoring panel's 概览 tab (context occupancy, token
-  composition, run metrics) and three layout presets (专注 / 经典 / 极简).
-- Added: the status bar's cost segment — cache hit rate plus an estimated
-  cost, priced from a user-editable table at `~/.dsh/model-prices.json`
-  (built-in DeepSeek pricing; unmatched presets are simply not priced).
-- Fixed: the log bar's path menu called a toast helper that did not exist, so
-  a failed "open in editor" looked exactly like a successful one.
-- Fixed: clicking a session whose directory was already the sidebar's root
-  did nothing at all, with no feedback.
-
-**中文**
-- 新增：按会话过滤日志——在侧栏「会话」页双击会话，底部日志面板只跟随该会话（含子 agent）；过滤以 chip 形式显示在日志面板上，一键取消。日志面板原本隐藏时会自动显示。
-- 新增：侧栏「会话」页本身——按项目分组、最新在前、带上游标题；点击可把文件树定位到该会话目录。
-- 新增：监控面板「概览」页（上下文占用、token 构成、运行指标）与三档布局预设（专注/经典/极简）。
-- 新增：状态栏费用段——命中率 + 估算费用，价格来自 `~/.dsh/model-prices.json`（用户可编辑，内置 DeepSeek 官方价；未匹配的 preset 不计费）。
-- 修复：日志面板路径菜单调用了一个并不存在的提示函数，导致「用编辑器打开」失败时看起来和成功一样。
-- 修复：点击目录已等于侧栏根目录的会话时毫无反应且无任何提示。
-
-### v0.2.0 — 2026-09-02
+### v0.2.0 — 2026-09-03（首次公开发布 / first public release）
 
 **English**
 - Added: three-column workbench — file/git sidebar, monitoring panel, bottom
@@ -316,6 +289,21 @@ Linux 需要 `dpkg`/`fakeroot`，请在 Linux 容器（`node:22-bookworm`）内�
 - Added: `Ctrl+K` command palette, diagnostics self-check window
   (`Ctrl+Alt+D`), settings window (`Ctrl+,`), external editor integration,
   panel font scaling, workspace switcher (root name → dsh session dirs).
+- Added: the monitoring panel's 概览 tab (context occupancy, token
+  composition, run metrics) and three layout presets (专注 / 经典 / 极简).
+- Added: the status bar's cost segment — cache hit rate plus an estimated
+  cost, priced from a user-editable table at `~/.dsh/model-prices.json`
+  (built-in DeepSeek pricing; unmatched presets are simply not priced).
+- Added: the sidebar's Sessions tab — dsh sessions grouped by project,
+  newest first, with their upstream titles; a click re-roots the file tree.
+- Added: session-scoped log filter — double-click a session in the sidebar's
+  Sessions tab and the bottom log bar follows that conversation (subagents
+  included); the filter shows as a chip in the log bar and clears with one
+  click. The log bar is revealed automatically if it was hidden.
+- Fixed: the log bar's path menu called a toast helper that did not exist, so
+  a failed "open in editor" looked exactly like a successful one.
+- Fixed: clicking a session whose directory was already the sidebar's root
+  did nothing at all, with no feedback.
 - Internal: every IPC channel centralized in one registry; pure-logic
   modules kept dependency-free and unit-tested; contract tests guard the
   preload/page/channel wiring.
@@ -324,6 +312,12 @@ Linux 需要 `dpkg`/`fakeroot`，请在 Linux 容器（`node:22-bookworm`）内�
 - 新增：三栏工作台——文件/git 侧栏、监控面板、底部日志面板（可拖拽调高）、状态栏（实时聚合的 agent 统计，主/子 agent 一并覆盖）。
 - 新增：侧栏带护栏的 git 操作——暂存/取消暂存/提交、切分支与放弃改动（二次确认）；自动更新工作区保持只读、尊重 index.lock、hooks 正常运行。
 - 新增：`Ctrl+K` 命令面板、诊断自检窗口（`Ctrl+Alt+D`）、设置窗口（`Ctrl+,`）、外部编辑器集成、面板字号调节、工作区切换器（根目录名 → dsh 会话目录）。
+- 新增：监控面板「概览」页（上下文占用、token 构成、运行指标）与三档布局预设（专注/经典/极简）。
+- 新增：状态栏费用段——命中率 + 估算费用，价格来自 `~/.dsh/model-prices.json`（用户可编辑，内置 DeepSeek 官方价；未匹配的 preset 不计费）。
+- 新增：侧栏「会话」页——按项目分组、最新在前、带上游标题；点击可把文件树定位到该会话目录。
+- 新增：按会话过滤日志——在侧栏「会话」页双击会话，底部日志面板只跟随该会话（含子 agent）；过滤以 chip 形式显示在日志面板上，一键取消。日志面板原本隐藏时会自动显示。
+- 修复：日志面板路径菜单调用了一个并不存在的提示函数，导致「用编辑器打开」失败时看起来和成功一样。
+- 修复：点击目录已等于侧栏根目录的会话时毫无反应且无任何提示。
 - 内部：全部 IPC 通道集中注册；纯逻辑模块保持零依赖并可单测；契约测试守护 preload/页面/通道接线。
 
 ### v0.1.0 — 2026-08-22
